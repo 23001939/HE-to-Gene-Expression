@@ -30,8 +30,8 @@ import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # Login W&B
-wandb.login(key="c0bf463d253eb9147fbe555216398f2838fe517c")
-wandb_logger = WandbLogger(project="ST", entity="dacthai2807", name="WSUNI_adapk_pos_50epoch")
+# wandb.login(key="c0bf463d253eb9147fbe555216398f2838fe517c")
+# wandb_logger = WandbLogger(project="ST", entity="dacthai2807", name="WSUNI_adapk_pos_50epoch")
 
 fold = 5
 tag = '-htg_her2st_785_32_cv'
