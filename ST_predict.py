@@ -101,7 +101,7 @@ elif mode == "WSUNI":
     sc.pl.spatial(adata_pred, img=None, color='FASN', spot_size=112, color_map='magma', save='WSUNI_FASN.png')
     
 if mode == "WSUNI_2":
-    model = WSUNI.load_from_checkpoint("model_ckpts/WSUNI_adapk_50epoch/WSUNI_every5epoch_-htg_her2st_785_32_cv_5_epoch=49.ckpt", n_genes=785, learning_rate=1e-5, max_epochs=50)
+    model = WSUNI.load_from_checkpoint("model_ckpts/WSUNI_adapk_pos_50epoch/WSUNI_every5epoch_-htg_her2st_785_32_cv_5_epoch=49.ckpt", n_genes=785, learning_rate=1e-5, max_epochs=50)
     device = torch.device("cuda")
     dataset = WSUNI_SliceLevel_HER2ST(train=False, fold=fold, cache_dir='cache_features_test_saved', topk=40)
     test_loader = DataLoader(dataset, batch_size=1, num_workers=4)
