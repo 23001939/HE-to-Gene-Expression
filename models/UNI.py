@@ -12,7 +12,7 @@ from einops import rearrange
 import timm
 import loralib as lora
 from huggingface_hub import login, hf_hub_download
-login(token="hf_nDStfkvIAlgNhDrxiQeRPyNZQewcpwEeuSL")
+login(token="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")
 
 import os
 
