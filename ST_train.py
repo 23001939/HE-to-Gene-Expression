@@ -36,7 +36,7 @@ wandb_logger = WandbLogger(project="ST", entity="dacthai2807", name="WSUNI_adapk
 fold = 5
 tag = '-htg_her2st_785_32_cv'
 
-mode = "WS_UNI"#input("Choose model to train [Histogene/ST-Net/UNI/WS_UNI]: ")
+mode = "UNI"#input("Choose model to train [Histogene/ST-Net/UNI/WS_UNI]: ")
 
 if mode == "Histogene":
     dataset = ViT_HER2ST(train=True, fold=fold)
