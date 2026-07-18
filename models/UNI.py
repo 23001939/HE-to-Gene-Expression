@@ -11,6 +11,12 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from einops import rearrange
 import timm
 import loralib as lora
+from huggingface_hub import login, hf_hub_download
+login(token="hf_nDStfkvIAlgNhDrxiQeRPyNZQewcpwEeuSL")
+
+import os
+
+
 
 
 class SimilarityContrastiveLoss(nn.Module):
@@ -110,18 +116,36 @@ class UNI(pl.LightningModule):
         self.n_genes = n_genes
         
         self.simCL = SimilarityContrastiveLoss(0.2)
-        # login()
-        self.enc1 = timm.create_model("hf-hub:MahmoodLab/uni", pretrained=True, init_values=1e-5, dynamic_img_size=True)
-        self.enc2 = timm.create_model("hf-hub:MahmoodLab/uni", pretrained=True, init_values=1e-5, dynamic_img_size=True)
-        self.enc0 = timm.create_model("hf-hub:MahmoodLab/uni", pretrained=True, init_values=1e-5, dynamic_img_size=True)
+        
+        # Hàm khởi tạo model không dùng hf-hub trực tiếp để tránh lỗi xác thực
+        self.enc0 = self._load_uni_model()
+        self.enc1 = self._load_uni_model()
+        self.enc2 = self._load_uni_model()
         
         self.attn_01 = CrossAttention(dim=1024, heads=8, dim_head=64, dropout=0.2)
-        # self.attn_02 = CrossAttention(dim=1024, heads=8, dim_head=64, dropout=0.1)
-        
         self.apply_lora_to_vit(16, 32)
         
         self.gene_head1 = nn.Linear(1024, n_genes)
         self.gene_head2 = nn.Linear(1024, n_genes)
+
+    def _load_uni_model(self):
+        # 1. Tải file trọng số về
+        weights_path = hf_hub_download(repo_id="MahmoodLab/UNI", filename="pytorch_model.bin")
+        
+        # 2. Khởi tạo cấu trúc ViT-Large chính xác theo yêu cầu của MahmoodLab
+        model = timm.create_model(
+            "vit_large_patch16_224", 
+            img_size=224, 
+            patch_size=16, 
+            num_classes=0, 
+            init_values=1e-5, 
+            dynamic_img_size=True
+        )
+        
+        # 3. Load trọng số
+        state_dict = torch.load(weights_path, map_location="cpu")
+        model.load_state_dict(state_dict, strict=True)
+        return model
 
     def forward(self, x0, x1, x2):
         """
