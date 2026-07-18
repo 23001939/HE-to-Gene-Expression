@@ -36,7 +36,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 fold = 5
 tag = '-htg_her2st_785_32_cv'
 
-mode = "ST-Net"#input("Choose model to train [Histogene/ST-Net/UNI/WS_UNI]: ")
+mode = "WSUNI"#input("Choose model to train [Histogene/ST-Net/UNI/WS_UNI]: ")
 
 if mode == "Histogene":
     dataset = ViT_HER2ST(train=True, fold=fold)
