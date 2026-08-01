@@ -352,12 +352,14 @@ checkpoint_callback = ModelCheckpoint(
 # Trainer
 trainer = pl.Trainer(
     accelerator='gpu' if torch.cuda.is_available() else 'cpu',
-    devices=1,              # <-- ép 1 GPU, tắt hẳn DDP, không cần use_distributed_sampler nữa
+    devices=1,
     max_epochs=MAX_EPOCHS,
     callbacks=[early_stop_callback, checkpoint_callback],
     logger=default_logger,
-    log_every_n_steps=100,   
+    log_every_n_steps=10,
     gradient_clip_val=1.0,
+    enable_progress_bar=False,      # Tắt progress bar
+    enable_model_summary=False,     # Tắt bảng tóm tắt model
 )
 
 # Train
