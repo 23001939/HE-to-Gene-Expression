@@ -355,7 +355,7 @@ trainer = pl.Trainer(
     max_epochs=MAX_EPOCHS,
     callbacks=[early_stop_callback, checkpoint_callback],
     logger=default_logger,
-    log_every_n_steps=50,
+    log_every_n_steps=100,
     gradient_clip_val=1.0
 )
 
