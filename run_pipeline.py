@@ -354,7 +354,7 @@ trainer = pl.Trainer(
     max_epochs=MAX_EPOCHS,
     callbacks=[early_stop_callback, checkpoint_callback],
     logger=default_logger,
-    log_every_n_steps=10,
+    log_every_n_steps=50,
     gradient_clip_val=1.0,
     use_distributed_sampler=False  # Thêm dòng này để báo Lightning không tự động inject sampler
 )
