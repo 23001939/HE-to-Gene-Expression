@@ -159,15 +159,15 @@ for d in ["model_ckpts"]:
 # ---- Cell 17 (notebook gốc) ----
 # ============================================================================
 # Tao file __init__.py
-with open("models/__init__.py", "w") as f:
-    f.write("from .LightHGGEP import LightHGGEP\n")
+# with open("models/__init__.py", "w") as f:
+#     f.write("from .LightHGGEP import LightHGGEP\n")
 
-import sys
-if WORKDIR not in sys.path:
-    sys.path.insert(0, WORKDIR)
+# import sys
+# if WORKDIR not in sys.path:
+#     sys.path.insert(0, WORKDIR)
 
-print("Da ghi xong toan bo module. Cau truc thu muc hien tai:")
-subprocess.run('''find . -maxdepth 2 -name "*.py" | sort''', shell=True)  # [DỊCH TỪ IPYTHON] gốc: !find . -maxdepth 2 -name "*.py" | sort
+# print("Da ghi xong toan bo module. Cau truc thu muc hien tai:")
+# subprocess.run('''find . -maxdepth 2 -name "*.py" | sort''', shell=True)  # [DỊCH TỪ IPYTHON] gốc: !find . -maxdepth 2 -name "*.py" | sort
 
 # ============================================================================
 # ---- Cell 19 (notebook gốc) ----
