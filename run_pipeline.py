@@ -255,6 +255,19 @@ class SectionBatchSampler(Sampler):
 
     def __len__(self):
         return sum(math.ceil(len(v) / self.batch_size) for v in self.section_indices.values())
+
+from pytorch_lightning.callbacks import Callback
+
+class SimpleProgressBar(Callback):
+    def on_train_epoch_end(self, trainer, pl_module):
+        train_loss = trainer.callback_metrics.get('train_loss', 0.0)
+        val_loss = trainer.callback_metrics.get('val_loss', 0.0)
+        current_epoch = trainer.current_epoch
+        total_epochs = trainer.max_epochs
+        lr = trainer.optimizers[0].param_groups[0]['lr']
+        
+        # In đúng format bạn muốn
+        print(f"[ep {current_epoch}/{total_epochs}] loss={train_loss:.4f} val_loss={val_loss:.4f} lr={lr:.4e}")
         
 def section_collate_fn(batch):
     """Thay the default_collate CHI cho truong section_name (str -> giu nguyen 1 chuoi
@@ -354,7 +367,7 @@ trainer = pl.Trainer(
     accelerator='gpu' if torch.cuda.is_available() else 'cpu',
     devices=1,
     max_epochs=MAX_EPOCHS,
-    callbacks=[early_stop_callback, checkpoint_callback],
+    callbacks=[early_stop_callback, checkpoint_callback, SimpleProgressBar()],
     logger=default_logger,
     log_every_n_steps=10,
     gradient_clip_val=1.0,
