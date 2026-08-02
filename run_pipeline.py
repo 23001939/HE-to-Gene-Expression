@@ -75,7 +75,13 @@ print("Logger:", default_logger)
 import os
 import pathlib
 
-WORKDIR = "/kaggle/working"
+# [SỬA lỗi #6] WORKDIR không còn hardcode "/kaggle/working" -- tự phát hiện môi trường:
+# trên Kaggle dùng /kaggle/working như cũ; trên môi trường khác (local, Colab) dùng thư
+# mục chứa file này để tránh FileNotFoundError khi os.chdir().
+if os.path.isdir("/kaggle/working"):
+    WORKDIR = "/kaggle/working"
+else:
+    WORKDIR = str(pathlib.Path(__file__).parent.resolve())
 os.chdir(WORKDIR)
 
 # Cac thu muc se duoc tao trong qua trinh chay:
@@ -95,7 +101,11 @@ print("Working dir:", os.getcwd())
 # 2.1 Clone du lieu HER2ST (chi can chay 1 LAN)
 # ----------------------------------------------------------
 if not os.path.isdir("data/her2st/.git"):
-    subprocess.run("cd data && git clone https://github.com/almaan/her2st.git", shell=True)  # [DỊCH TỪ IPYTHON] gốc: !cd data && git clone https://github.com/almaan/her2st.git
+    # [SỬA lỗi #7] Dùng tham số cwd thay vì "cd data && ..." -- lệnh cd trong subprocess
+    # shell=True chạy trong tiến trình con riêng nên không ảnh hưởng thư mục làm việc
+    # của Python; dùng cwd= là cách đúng và nhất quán trên cả Linux lẫn Windows.
+    # [DỊCH TỪ IPYTHON] gốc: !cd data && git clone https://github.com/almaan/her2st.git
+    subprocess.run("git clone https://github.com/almaan/her2st.git", shell=True, cwd="data")
 else:
     print("data/her2st da ton tai, bo qua clone.")
 
@@ -264,7 +274,14 @@ class SimpleProgressBar(Callback):
         val_loss = trainer.callback_metrics.get('val_loss', 0.0)
         current_epoch = trainer.current_epoch
         total_epochs = trainer.max_epochs
-        lr = trainer.optimizers[0].param_groups[0]['lr']
+        # [SỬA lỗi #10] trainer.optimizers có thể là [] trong một số phiên bản PL vì
+        # optimizers được lazy-init; pl_module.optimizers() luôn trả về optimizer đang
+        # hoạt động một cách an toàn hơn.
+        opt = pl_module.optimizers()
+        # optimizers() có thể trả về list hoặc optimizer đơn tùy phiên bản PL
+        if isinstance(opt, list):
+            opt = opt[0]
+        lr = opt.param_groups[0]['lr']
         
         # In đúng format bạn muốn
         print(f"[ep {current_epoch}/{total_epochs}] loss={train_loss:.4f} val_loss={val_loss:.4f} lr={lr:.4e}")
@@ -412,17 +429,30 @@ test_dataset = LightHGGEP_HER2ST(train=False, fold=FOLD, k_neighbors=K_NEIGHBORS
 for section, A_norm in test_dataset.A_norm_cache.items():
     best_model.set_graph(section, torch.from_numpy(A_norm).float())
 
-test_loader = DataLoader(test_dataset, batch_size=1, num_workers=0, collate_fn=section_collate_fn)
+# [SỬA lỗi #4] test_loader phải đưa TOÀN BỘ spot của 1 section vào cùng 1 batch (hoặc
+# ít nhất các batch đủ lớn từ cùng 1 section) để Spatial SGC có thể lấy đúng
+# A_norm_full[local_indices][:, local_indices] với đầy đủ thông tin lân cận.
+# Dùng batch_size=1 trước đây → A_norm_batch = (1×1) → SGC không thấy láng giềng nào,
+# hoàn toàn vô nghĩa về mặt không gian.
+# SectionBatchSampler với shuffle=False đảm bảo mỗi batch CHỈ chứa 1 section và
+# duyệt tuần tự, phù hợp cho inference.
+test_sampler = SectionBatchSampler(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+test_loader = DataLoader(test_dataset, batch_sampler=test_sampler, num_workers=0,
+                         collate_fn=section_collate_fn)
 
 # Predict
 label = test_dataset.label[test_dataset.names[0]]
 adata_pred, adata_gt = lighthggep_predict(best_model, test_loader, device=device)
 
 # Post-processing
-adata_pred = comp_tsne_km(adata_pred, 4)
+# [SỬA lỗi #11] scale TRƯỚC comp_tsne_km để PCA/tSNE/KMeans cluster trên dữ liệu đã
+# chuẩn hoá -- nhất quán với metrics (get_R/MSE/MAE cũng tính trên scaled data).
+# Thứ tự cũ (comp_tsne_km → scale) khiến cluster dựa trên unscaled data nhưng report
+# PCC trên scaled data -- mâu thuẫn.
 g = list(np.load('data/her_hvg_cut_1000.npy', allow_pickle=True))
 adata_pred.var_names = g
 sc.pp.scale(adata_pred)
+adata_pred = comp_tsne_km(adata_pred, 4)
 
 # ==================== TÍNH TOÁN METRICS ====================
 
@@ -482,8 +512,14 @@ print(f"  Số gene có PCC > 0.2: {np.sum(R > 0.2):,}/{len(R)} ({100*np.sum(R >
 print(f"  Số gene có PCC > 0.3: {np.sum(R > 0.3):,}/{len(R)} ({100*np.sum(R > 0.3)/len(R):.1f}%)")
 
 # ARI
-clus, ARI = cluster(adata_pred, label)
-print(f"\nARI (Adjusted Rand Index): {ARI:.4f}")
+# [SỬA lỗi #8] label là None nếu section test không nằm trong danh sách có annotation
+# ['A1','B1',...,'H1','J1'] -- cluster() crash với TypeError khi label=None.
+if label is not None:
+    clus, ARI = cluster(adata_pred, label)
+    print(f"\nARI (Adjusted Rand Index): {ARI:.4f}")
+else:
+    ARI = float('nan')
+    print("\nARI: N/A (section này không có ground-truth label)")
 print("="*70)
 
 # ==================== VẼ HISTOGRAM PCC ====================
