@@ -309,7 +309,7 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
             log_every_n_steps=10,
             gradient_clip_val=1.0,
             precision="16-mixed" if accelerator == "gpu" else "32-true",
-            enable_progress_bar=True,
+            enable_progress_bar=False,
             enable_model_summary=False,
             callbacks=[checkpoint_cb, early_stop_cb, EpochProgressBar()],
         )
