@@ -404,7 +404,7 @@ print(f"Best validation loss: {checkpoint_callback.best_model_score:.4f}")
 # ============================================================================
 # ---- Cell 27 (notebook gốc) ----
 # ============================================================================
-from predict import lighthggep_predict, get_R, get_MSE, get_MAE, cluster
+from predict import lighthggep_predict, get_R, get_MSE, get_MAE, get_Spearman, get_MoransI_all, cluster_with_nmi
 from utils import comp_tsne_km
 import scanpy as sc
 import numpy as np
@@ -459,11 +459,20 @@ adata_pred = comp_tsne_km(adata_pred, 4)
 # Pearson Correlation cho từng gene
 R, p_values = get_R(adata_pred, adata_gt)
 
+# Spearman Correlation cho từng gene
+Spearman, spearman_pvalues = get_Spearman(adata_pred, adata_gt)
+
 # MSE cho từng gene
 MSE = get_MSE(adata_pred, adata_gt)
 
 # MAE cho từng gene
 MAE = get_MAE(adata_pred, adata_gt)
+
+# RMSE cho từng gene
+RMSE = np.sqrt(MSE)
+
+# Moran's I -- tính trên top-50 gene variance cao nhất (pred và gt)
+morans = get_MoransI_all(adata_pred, adata_gt, top_k=50)
 
 # ==================== IN KẾT QUẢ CHI TIẾT ====================
 
@@ -473,34 +482,52 @@ print("="*70)
 
 # Thông tin tổng quan
 n_spots = adata_pred.shape[0]
-mean_pcc = np.nanmean(R)
-median_pcc = np.nanmedian(R)
-std_pcc = np.nanstd(R)
+mean_pcc      = np.nanmean(R)
+median_pcc    = np.nanmedian(R)
+std_pcc       = np.nanstd(R)
+mean_spearman = np.nanmean(Spearman)
+mean_rmse     = np.nanmean(RMSE)
+mean_mae      = np.nanmean(MAE)
+mean_mi_pred  = np.nanmean(morans['pred'])
+mean_mi_gt    = np.nanmean(morans['gt'])
 
-print(f"  Số spot test đã đánh giá : {n_spots}")
-print(f"  Số gene đánh giá        : {len(R)}")
-print(f"  MSE tổng thể             : {np.nanmean(MSE):.4f}")
-print(f"  PCC trung bình (gen)     : {mean_pcc:.4f}")
-print(f"  PCC trung vị   (gen)     : {median_pcc:.4f}")
-print(f"  PCC std        (gen)     : {std_pcc:.4f}")
+print(f"  Số spot test đã đánh giá  : {n_spots}")
+print(f"  Số gene đánh giá          : {len(R)}")
+print(f"")
+print(f"  [Correlation]")
+print(f"  Mean Gene-wise PCC        : {mean_pcc:.4f}")
+print(f"  Median Gene-wise PCC      : {median_pcc:.4f}")
+print(f"  Std Gene-wise PCC         : {std_pcc:.4f}")
+print(f"  Mean Gene-wise Spearman   : {mean_spearman:.4f}")
+print(f"")
+print(f"  [Error]")
+print(f"  Mean RMSE                 : {mean_rmse:.4f}")
+print(f"  Mean MAE                  : {mean_mae:.4f}")
+print(f"")
+print(f"  [Spatial structure - top-50 high-var genes]")
+print(f"  Mean Moran's I (pred)     : {mean_mi_pred:.4f}")
+print(f"  Mean Moran's I (gt)       : {mean_mi_gt:.4f}")
 
 # Tạo DataFrame với thông tin các gene
 gene_stats = pd.DataFrame({
-    'gene': g,
-    'pcc': R,
-    'p_value': p_values,
-    'mse': MSE,
-    'mae': MAE
+    'gene':          g,
+    'pcc':           R,
+    'pcc_pvalue':    p_values,
+    'spearman':      Spearman,
+    'spearman_pval': spearman_pvalues,
+    'mse':           MSE,
+    'rmse':          RMSE,
+    'mae':           MAE,
 })
 
 # Top-10 gene tốt nhất (PCC cao nhất)
 print("\nTop-10 gen dự đoán TỐT NHẤT (PCC cao nhất):")
-top10_best = gene_stats.nlargest(10, 'pcc')[['gene', 'pcc']]
+top10_best = gene_stats.nlargest(10, 'pcc')[['gene', 'pcc', 'spearman']]
 print("  " + top10_best.to_string(index=False).replace('\n', '\n  '))
 
 # Top-10 gene kém nhất (PCC thấp nhất)
 print("\nTop-10 gen dự đoán KÉM NHẤT (PCC thấp nhất):")
-top10_worst = gene_stats.nsmallest(10, 'pcc')[['gene', 'pcc']]
+top10_worst = gene_stats.nsmallest(10, 'pcc')[['gene', 'pcc', 'spearman']]
 print("  " + top10_worst.to_string(index=False).replace('\n', '\n  '))
 
 # Thống kê bổ sung
@@ -511,15 +538,18 @@ print(f"  Số gene có PCC > 0:  {np.sum(R > 0):,}/{len(R)} ({100*np.sum(R > 0)
 print(f"  Số gene có PCC > 0.2: {np.sum(R > 0.2):,}/{len(R)} ({100*np.sum(R > 0.2)/len(R):.1f}%)")
 print(f"  Số gene có PCC > 0.3: {np.sum(R > 0.3):,}/{len(R)} ({100*np.sum(R > 0.3)/len(R):.1f}%)")
 
-# ARI
+# ARI + NMI
 # [SỬA lỗi #8] label là None nếu section test không nằm trong danh sách có annotation
-# ['A1','B1',...,'H1','J1'] -- cluster() crash với TypeError khi label=None.
+# ['A1','B1',...,'H1','J1'] -- cluster_with_nmi() crash với TypeError khi label=None.
 if label is not None:
-    clus, ARI = cluster(adata_pred, label)
-    print(f"\nARI (Adjusted Rand Index): {ARI:.4f}")
+    clus, ARI, NMI = cluster_with_nmi(adata_pred, label)
+    print(f"\n  [Global structure]")
+    print(f"  ARI (Adjusted Rand Index) : {ARI:.4f}")
+    print(f"  NMI (Norm. Mutual Info)   : {NMI:.4f}")
 else:
     ARI = float('nan')
-    print("\nARI: N/A (section này không có ground-truth label)")
+    NMI = float('nan')
+    print("\nARI/NMI: N/A (section này không có ground-truth label)")
 print("="*70)
 
 # ==================== VẼ HISTOGRAM PCC ====================
@@ -572,14 +602,18 @@ print(f"Saved: figures/FASN/Light-HGGEP_FASN_fold{FOLD}.png")
 import pandas as pd
 
 results = pd.DataFrame([{
-    'model': 'Light-HGGEP',
-    'fold': FOLD,
-    'pearson': np.nanmean(R),
-    'ari': ARI,
-    'mse': np.nanmean(MSE),
-    'mae': np.nanmean(MAE),
-    'params': total_params,
-    'best_epoch': checkpoint_callback.best_model_score,
+    'model':          'Light-HGGEP',
+    'fold':           FOLD,
+    'pearson':        np.nanmean(R),
+    'spearman':       np.nanmean(Spearman),
+    'ari':            ARI,
+    'nmi':            NMI,
+    'rmse':           np.nanmean(RMSE),
+    'mae':            np.nanmean(MAE),
+    'morans_i_pred':  np.nanmean(morans['pred']),
+    'morans_i_gt':    np.nanmean(morans['gt']),
+    'params':         total_params,
+    'best_val_loss':  float(checkpoint_callback.best_model_score),
 }])
 
 print("\n" + "="*60)

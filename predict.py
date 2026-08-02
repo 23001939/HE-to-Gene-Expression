@@ -4,8 +4,9 @@ from utils import *
 import warnings
 from tqdm import tqdm
 warnings.filterwarnings('ignore')
-from scipy.stats import pearsonr
+from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import adjusted_rand_score as ari_score
+from sklearn.metrics import normalized_mutual_info_score as nmi_score
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
 MODEL_PATH = ''
@@ -99,3 +100,129 @@ def get_MAE(data1, data2, dim=1):
             mae = mean_absolute_error(adata1[g, :], adata2[g, :])
         mae_list.append(mae)
     return np.array(mae_list)
+
+
+def get_Spearman(data1, data2, dim=1):
+    """
+    Tính gene-wise Spearman Correlation Coefficient.
+    Cùng convention với get_R: dim=1 → lặp theo gene (cột),
+    trả về (rho_array, pvalue_array) shape (n_genes,).
+    Spearman bổ sung cho PCC vì không giả định phân phối tuyến tính --
+    bắt được cả monotonic relationship giữa pred và gt.
+    """
+    adata1 = data1.X
+    adata2 = data2.X
+    rho_list, p_list = [], []
+    for g in range(data1.shape[dim]):
+        if dim == 1:
+            rho, pv = spearmanr(adata1[:, g], adata2[:, g])
+        elif dim == 0:
+            rho, pv = spearmanr(adata1[g, :], adata2[g, :])
+        rho_list.append(rho)
+        p_list.append(pv)
+    return np.array(rho_list), np.array(p_list)
+
+
+def get_MoransI(adata, gene_idx, spatial_key='spatial'):
+    """
+    Tính Moran's I cho 1 gene trên toàn bộ spot, dùng tọa độ spatial làm
+    weight matrix (inverse distance, cắt tại K=6 láng giềng gần nhất).
+
+    Moran's I đo mức độ auto-correlation không gian của biểu hiện gene:
+      I ≈ +1 → biểu hiện phân bố thành cụm không gian (spatially clustered)
+      I ≈  0 → ngẫu nhiên
+      I ≈ -1 → phân tán đều
+
+    Trả về scalar I ∈ [-1, 1].
+
+    Tham số:
+        adata      : AnnData với adata.X shape (N, G) và adata.obsm[spatial_key] shape (N, 2)
+        gene_idx   : chỉ số gene (int) hoặc tên gene (str) trong adata.var_names
+        spatial_key: key trong obsm chứa tọa độ (x, y)
+    """
+    from sklearn.metrics.pairwise import pairwise_distances
+
+    coords = adata.obsm[spatial_key].astype(float)   # (N, 2)
+    if isinstance(gene_idx, str):
+        gene_idx = list(adata.var_names).index(gene_idx)
+    x = adata.X[:, gene_idx].astype(float)           # (N,)
+
+    N = len(x)
+    x_mean = x.mean()
+    x_dev = x - x_mean
+
+    # Build K-NN weight matrix (K=6, inverse distance)
+    D = pairwise_distances(coords, metric='euclidean')
+    K = min(6, N - 1)
+    W = np.zeros((N, N), dtype=float)
+    for i in range(N):
+        order = np.argsort(D[i])
+        neighbors = order[order != i][:K]
+        for j in neighbors:
+            W[i, j] = 1.0 / (D[i, j] + 1e-8)
+
+    W_sum = W.sum()
+    if W_sum == 0:
+        return float('nan')
+
+    numerator   = N * np.sum(W * np.outer(x_dev, x_dev))
+    denominator = W_sum * np.sum(x_dev ** 2)
+    if denominator == 0:
+        return float('nan')
+
+    return numerator / denominator
+
+
+def get_MoransI_all(data_pred, data_gt, top_k=50, spatial_key='spatial'):
+    """
+    Tính Moran's I cho cả pred lẫn gt trên top_k gene có variance cao nhất
+    (tính trên gt để chọn gene thú vị về mặt sinh học).
+
+    Trả về dict:
+        {
+          'pred': np.array shape (top_k,),  -- Moran's I của từng gene trên pred
+          'gt':   np.array shape (top_k,),  -- Moran's I của từng gene trên gt
+          'gene_indices': np.array shape (top_k,)
+        }
+    """
+    gt_X = data_gt.X
+    var_per_gene = np.var(gt_X, axis=0)                    # variance theo từng gene
+    top_indices  = np.argsort(var_per_gene)[::-1][:top_k]  # top_k gene variance cao nhất
+
+    mi_pred, mi_gt = [], []
+    for idx in top_indices:
+        mi_pred.append(get_MoransI(data_pred, idx, spatial_key))
+        mi_gt.append(get_MoransI(data_gt,   idx, spatial_key))
+
+    return {
+        'pred':         np.array(mi_pred),
+        'gt':           np.array(mi_gt),
+        'gene_indices': top_indices,
+    }
+
+
+def cluster_with_nmi(adata, label):
+    """
+    Mở rộng cluster(): tính thêm NMI bên cạnh ARI.
+    Trả về (cluster_labels, ARI, NMI).
+
+    NMI bổ sung cho ARI vì:
+      - ARI hiệu chỉnh theo chance, nhạy với số cluster và size imbalance.
+      - NMI đo mức độ chia sẻ thông tin giữa 2 phân hoạch, ít bị ảnh hưởng
+        bởi số cluster hơn.
+    """
+    idx = label != 'undetermined'
+    tmp = adata[idx]
+    l   = label[idx]
+    sc.pp.pca(tmp)
+    sc.tl.tsne(tmp)
+    kmeans = KMeans(n_clusters=len(set(l)), init="k-means++", random_state=0).fit(tmp.obsm['X_pca'])
+    p = kmeans.labels_.astype(str)
+
+    lbl = np.full(len(adata), str(len(set(l))))
+    lbl[idx] = p
+    adata.obs['kmeans'] = lbl
+
+    ari = round(ari_score(p, l), 4)
+    nmi = round(nmi_score(p, l, average_method='arithmetic'), 4)
+    return p, ari, nmi
