@@ -277,6 +277,8 @@ from pytorch_lightning.callbacks import Callback
 
 class SimpleProgressBar(Callback):
     def on_train_epoch_end(self, trainer, pl_module):
+        if not trainer.is_global_zero:
+            return
         train_mse = trainer.callback_metrics.get('train_mse', trainer.callback_metrics.get('train_loss', 0.0))
         val_mse = trainer.callback_metrics.get('val_mse', trainer.callback_metrics.get('val_loss', 0.0))
         train_pcc = trainer.callback_metrics.get('train_pcc', float('nan'))

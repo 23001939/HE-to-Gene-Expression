@@ -21,6 +21,7 @@ import albumentations as A
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 Image.MAX_IMAGE_PIXELS = None
 import random
+from collections import OrderedDict
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.metrics.pairwise import pairwise_distances
 
@@ -46,8 +47,13 @@ class HER2ST(torch.utils.data.Dataset):
             self.names = tr_names
         else:
             self.names = te_names
-        print('Loading imgs...')
-        self.img_dict = {i:self.get_img(i) for i in self.names}
+        print('Registering image paths...')
+        # DDP launches one dataset instance per rank.  Keeping all decoded WSI
+        # images alive in each process exhausts host RAM, so retain only a tiny
+        # LRU cache and open a slide on demand.
+        self.img_paths = {i: self.get_img_path(i) for i in self.names}
+        self.img_dict = OrderedDict()
+        self.img_cache_size = 2
         print('Loading metadata...')
         self.meta_dict = {i:self.get_meta(i) for i in self.names}
         self.label={i:None for i in self.names}
@@ -97,7 +103,7 @@ class HER2ST(torch.utils.data.Dataset):
         exp = torch.Tensor(exp)
         loc = torch.Tensor(loc)
         x, y = center
-        patch = self.img_dict[self.id2name[i]].crop((x-self.r, y-self.r, x+self.r, y+self.r))
+        patch = self._get_img_cached(self.id2name[i]).crop((x-self.r, y-self.r, x+self.r, y+self.r))
         if self.train:
             patch = self.transforms(patch)
         else:
@@ -109,11 +115,23 @@ class HER2ST(torch.utils.data.Dataset):
     def __len__(self):
         return self.cumlen[-1]
     def get_img(self,name):
+        return Image.open(self.get_img_path(name)).convert("RGB")
+
+    def get_img_path(self, name):
         pre = self.img_dir+'/'+name[0]+'/'+name
         fig_name = os.listdir(pre)[0]
-        path = pre+'/'+fig_name
-        im = Image.open(path)
-        return im
+        return pre+'/'+fig_name
+
+    def _get_img_cached(self, name):
+        if name in self.img_dict:
+            self.img_dict.move_to_end(name)
+            return self.img_dict[name]
+        image = Image.open(self.img_paths[name]).convert("RGB")
+        self.img_dict[name] = image
+        if len(self.img_dict) > self.img_cache_size:
+            _, old_image = self.img_dict.popitem(last=False)
+            old_image.close()
+        return image
     def get_cnt(self,name):
         path = self.cnt_dir+'/'+name+'.tsv'
         df = pd.read_csv(path,sep='\t',index_col=0)
@@ -196,8 +214,10 @@ class LightHGGEP_HER2ST(torch.utils.data.Dataset):
         else:
             self.names = te_names
         
-        print('Loading imgs for Light-HGGEP...')
-        self.img_dict = {i: self.get_img(i) for i in self.names}
+        print('Registering image paths for Light-HGGEP...')
+        self.img_paths = {i: self.get_img_path(i) for i in self.names}
+        self.img_dict = OrderedDict()
+        self.img_cache_size = 2
         
         print('Loading metadata...')
         self.meta_dict = {i: self.get_meta(i) for i in self.names}
@@ -319,7 +339,7 @@ class LightHGGEP_HER2ST(torch.utils.data.Dataset):
         loc = torch.Tensor(loc)
         
         x, y = center
-        patch = self.img_dict[name].crop((x - self.r, y - self.r, x + self.r, y + self.r))
+        patch = self._get_img_cached(name).crop((x - self.r, y - self.r, x + self.r, y + self.r))
         
         # [SỬA] Áp dụng transforms khi patch còn là PIL Image
         if self.train:
@@ -342,11 +362,23 @@ class LightHGGEP_HER2ST(torch.utils.data.Dataset):
         return self.cumlen[-1]
     
     def get_img(self, name):
+        return Image.open(self.get_img_path(name)).convert("RGB")
+
+    def get_img_path(self, name):
         pre = self.img_dir + '/' + name[0] + '/' + name
         fig_name = os.listdir(pre)[0]
-        path = pre + '/' + fig_name
-        im = Image.open(path)
-        return im
+        return pre + '/' + fig_name
+
+    def _get_img_cached(self, name):
+        if name in self.img_dict:
+            self.img_dict.move_to_end(name)
+            return self.img_dict[name]
+        image = Image.open(self.img_paths[name]).convert("RGB")
+        self.img_dict[name] = image
+        if len(self.img_dict) > self.img_cache_size:
+            _, old_image = self.img_dict.popitem(last=False)
+            old_image.close()
+        return image
     
     def get_cnt(self, name):
         path = self.cnt_dir + '/' + name + '.tsv'

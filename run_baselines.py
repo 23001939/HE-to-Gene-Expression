@@ -103,6 +103,8 @@ from predict import stnet_predict, histogene_predict
 class EpochProgressBar(Callback):
     """In MSE/PCC train-validation và learning rate sau mỗi epoch."""
     def on_train_epoch_end(self, trainer, pl_module):
+        if not trainer.is_global_zero:
+            return
         m        = trainer.callback_metrics
         ep       = trainer.current_epoch + 1
         total    = trainer.max_epochs
