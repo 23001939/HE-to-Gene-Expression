@@ -394,7 +394,7 @@ checkpoint_callback = ModelCheckpoint(
 trainer = pl.Trainer(
     accelerator='gpu' if torch.cuda.is_available() else 'cpu',
     devices=N_GPUS,
-    strategy='ddp' if N_GPUS > 1 else 'auto',
+    strategy='ddp_find_unused_parameters_true' if N_GPUS > 1 else 'auto',
     # SectionBatchSampler shards whole spatial sections itself.
     use_distributed_sampler=False,
     max_epochs=MAX_EPOCHS,

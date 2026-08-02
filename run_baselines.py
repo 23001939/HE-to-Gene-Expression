@@ -225,7 +225,9 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
     # Đơn giản, không cần spawn, không conflict với num_workers=0.
     # DDP sẽ nhanh hơn nhưng cần multi-process → phức tạp hơn khi chạy từ script.
     if n_gpus > 1 and not skip_train:
-        strategy = "ddp"
+        # HisToGene contains an intentionally unused normalisation module;
+        # enabling this DDP mode is required to train it across two GPUs.
+        strategy = "ddp_find_unused_parameters_true"
         accelerator = "gpu"
         devices = n_gpus
     elif torch.cuda.is_available():
