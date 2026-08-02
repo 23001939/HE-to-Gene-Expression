@@ -233,6 +233,12 @@ import math
 from torch.utils.data import Sampler
 
 
+def debug_worker_init(worker_id):
+    """One-line, flushed worker startup trace for Kaggle DDP diagnosis."""
+    rank = os.environ.get("LOCAL_RANK", "0")
+    print(f"[debug rank={rank}] DataLoader worker {worker_id} started", flush=True)
+
+
 class SectionBatchSampler(Sampler):
     def __init__(self, dataset, batch_size, shuffle=True,
                  include_sections=None, exclude_sections=None,
@@ -274,7 +280,10 @@ class SectionBatchSampler(Sampler):
                 yield idxs[s:s + self.batch_size]
 
     def __len__(self):
-        return sum(math.ceil(len(v) / self.batch_size) for v in self.section_indices.values())
+        # ``section_indices`` retains every section for lookup, while
+        # ``section_names`` is the rank-local shard used by __iter__.
+        return sum(math.ceil(len(self.section_indices[name]) / self.batch_size)
+                   for name in self.section_names)
 
 from pytorch_lightning.callbacks import Callback
 
@@ -309,6 +318,33 @@ class SimpleProgressBar(Callback):
               f"train_mse={train_mse:.4f} train_pcc={train_pcc:.4f} "
               f"val_mse={val_mse:.4f} val_pcc={val_pcc:.4f} lr={lr:.4e} "
               f"epoch_time={elapsed:.1f}s eta={remaining / 60:.1f}m")
+
+
+class DebugLifecycle(Callback):
+    """Low-volume DDP traces to identify a blocked training stage."""
+    @staticmethod
+    def _log(trainer, stage):
+        print(f"[debug rank={trainer.global_rank}/{trainer.world_size}] {stage}",
+              flush=True)
+
+    def on_fit_start(self, trainer, pl_module):
+        self._log(trainer, "fit started")
+
+    def on_sanity_check_start(self, trainer, pl_module):
+        self._log(trainer, "sanity validation started")
+
+    def on_sanity_check_end(self, trainer, pl_module):
+        self._log(trainer, "sanity validation finished")
+
+    def on_train_start(self, trainer, pl_module):
+        self._log(trainer, f"train started; batches={trainer.num_training_batches}")
+
+    def on_train_epoch_start(self, trainer, pl_module):
+        self._log(trainer, f"epoch {trainer.current_epoch + 1} started")
+
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
+        if batch_idx == 0:
+            self._log(trainer, "first train batch reached")
         
 def section_collate_fn(batch):
     """Thay the default_collate CHI cho truong section_name (str -> giu nguyen 1 chuoi
@@ -372,15 +408,19 @@ val_sampler = SectionBatchSampler(train_dataset, batch_size=BATCH_SIZE, shuffle=
                                    num_replicas=DDP_WORLD_SIZE, shard_sections=False)
 print(f"DDP data shard: rank {DDP_RANK}/{DDP_WORLD_SIZE}; "
       f"train sections={len(train_sampler.section_names)}, "
-      f"train batches={len(train_sampler)}")
+      f"train batches={len(train_sampler)}", flush=True)
 loader_options = dict(num_workers=NUM_WORKERS,
                       pin_memory=torch.cuda.is_available(),
-                      persistent_workers=NUM_WORKERS > 0)
+                      persistent_workers=NUM_WORKERS > 0,
+                      worker_init_fn=debug_worker_init,
+                      timeout=180)
 eval_loader_options = dict(num_workers=NUM_WORKERS,
                            pin_memory=torch.cuda.is_available(),
                            # Avoid keeping train and validation worker caches
                            # alive simultaneously on every DDP rank.
-                           persistent_workers=False)
+                           persistent_workers=False,
+                           worker_init_fn=debug_worker_init,
+                           timeout=180)
 train_loader = DataLoader(train_dataset, batch_sampler=train_sampler,
                            collate_fn=section_collate_fn, **loader_options)
 val_loader = DataLoader(train_dataset, batch_sampler=val_sampler,
@@ -431,7 +471,8 @@ trainer = pl.Trainer(
     # SectionBatchSampler shards whole spatial sections itself.
     use_distributed_sampler=False,
     max_epochs=MAX_EPOCHS,
-    callbacks=[early_stop_callback, checkpoint_callback, SimpleProgressBar()],
+    callbacks=[early_stop_callback, checkpoint_callback, SimpleProgressBar(),
+               DebugLifecycle()],
     logger=default_logger,
     log_every_n_steps=10,
     gradient_clip_val=1.0,
@@ -441,6 +482,7 @@ trainer = pl.Trainer(
 )
 
 # Train
+print(f"[debug rank={DDP_RANK}/{DDP_WORLD_SIZE}] calling trainer.fit", flush=True)
 trainer.fit(model, train_loader, val_loader)
 
 # Only rank zero performs the single canonical test evaluation and writes files.
