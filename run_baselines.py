@@ -216,36 +216,36 @@ if not args.skip_train:
         # HisToGene validation_step unpack (patch, loc, exp) — 3 phần tử
         # HER2ST(train=False) trả về 4 phần tử → dùng collate_drop_center
         train_loader = DataLoader(train_subset, batch_size=BATCH_SIZE,
-                                  num_workers=4, shuffle=True)
+                                  num_workers=0, shuffle=True)
         val_loader   = DataLoader(val_subset,   batch_size=BATCH_SIZE,
-                                  num_workers=4, shuffle=False,
+                                  num_workers=0, shuffle=False,
                                   collate_fn=collate_drop_center)
         model = HisToGene(n_layers=8, n_genes=N_GENES, learning_rate=LR)
 
     elif MODE == "stnet":
         # STModel validation_step unpack (patch, loc, exp) — 3 phần tử
         train_loader = DataLoader(train_subset, batch_size=BATCH_SIZE,
-                                  num_workers=4, shuffle=True)
+                                  num_workers=0, shuffle=True)
         val_loader   = DataLoader(val_subset,   batch_size=BATCH_SIZE,
-                                  num_workers=4, shuffle=False,
+                                  num_workers=0, shuffle=False,
                                   collate_fn=collate_drop_center)
         model = STModel(n_genes=N_GENES, learning_rate=LR)
 
     elif MODE == "uni":
         # UNI validation_step: cần xác nhận format — dùng collate_drop_center an toàn
         train_loader = DataLoader(train_subset, batch_size=BATCH_SIZE,
-                                  num_workers=4, shuffle=True)
+                                  num_workers=0, shuffle=True)
         val_loader   = DataLoader(val_subset,   batch_size=BATCH_SIZE,
-                                  num_workers=4, shuffle=False,
+                                  num_workers=0, shuffle=False,
                                   collate_fn=collate_drop_center)
         model = UNI(n_genes=N_GENES, learning_rate=LR, max_epochs=MAX_EPOCHS)
         model.enable_lora_training()
 
     elif MODE == "wsuni":
         train_loader = DataLoader(train_subset, batch_size=BATCH_SIZE,
-                                  num_workers=4, shuffle=True)
+                                  num_workers=0, shuffle=True)
         val_loader   = DataLoader(val_subset,   batch_size=BATCH_SIZE,
-                                  num_workers=4, shuffle=False,
+                                  num_workers=0, shuffle=False,
                                   collate_fn=collate_drop_center)
         model = WSUNI(n_genes=N_GENES, learning_rate=LR, max_epochs=MAX_EPOCHS)
 
@@ -285,8 +285,7 @@ if MODE == "histogene":
     model = HisToGene.load_from_checkpoint(
         ckpt_path, n_layers=8, n_genes=N_GENES, learning_rate=LR,
     )
-    # histogene_predict gom toàn bộ spots thành slide-level batch
-    test_loader  = DataLoader(test_dataset, batch_size=1, num_workers=4,
+    test_loader  = DataLoader(test_dataset, batch_size=1, num_workers=0,
                                shuffle=False)
     adata_pred, adata_gt = histogene_predict(model, test_loader, device=device)
 
@@ -295,16 +294,15 @@ elif MODE == "stnet":
         ckpt_path, n_genes=N_GENES, learning_rate=LR,
     )
     test_loader  = DataLoader(test_dataset, batch_size=BATCH_SIZE,
-                               num_workers=4, shuffle=False)
+                               num_workers=0, shuffle=False)
     adata_pred, adata_gt = stnet_predict(model, test_loader, device=device)
 
 elif MODE == "uni":
     model = UNI.load_from_checkpoint(
         ckpt_path, n_genes=N_GENES, learning_rate=LR, max_epochs=MAX_EPOCHS,
     )
-    # UNI nhận (patch, loc, exp, center) — dùng stnet_predict cùng format
     test_loader  = DataLoader(test_dataset, batch_size=BATCH_SIZE,
-                               num_workers=4, shuffle=False)
+                               num_workers=0, shuffle=False)
     adata_pred, adata_gt = stnet_predict(model, test_loader, device=device)
 
 elif MODE == "wsuni":
@@ -312,7 +310,7 @@ elif MODE == "wsuni":
         ckpt_path, n_genes=N_GENES, learning_rate=LR, max_epochs=MAX_EPOCHS,
     )
     test_loader  = DataLoader(test_dataset, batch_size=BATCH_SIZE,
-                               num_workers=4, shuffle=False)
+                               num_workers=0, shuffle=False)
     adata_pred, adata_gt = stnet_predict(model, test_loader, device=device)
 
 # ── Post-processing (đồng nhất với run_pipeline.py) ──────────────────────────
