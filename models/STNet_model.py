@@ -7,6 +7,7 @@ import torchvision
 import pytorch_lightning as pl
 from torchmetrics.functional import accuracy
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from training_metrics import mean_gene_pearson
 
 
 # adaptation of ST-Net
@@ -119,6 +120,8 @@ class STModel(pl.LightningModule):
         pred = self(patch, center)
         loss = F.mse_loss(pred, exp)
         self.log('train_loss', loss)
+        self.log('train_mse', loss, on_epoch=True, sync_dist=True)
+        self.log('train_pcc', mean_gene_pearson(pred, exp), on_epoch=True, sync_dist=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -126,6 +129,8 @@ class STModel(pl.LightningModule):
         pred = self(patch, center)
         loss = F.mse_loss(pred, exp)
         self.log('valid_loss', loss, on_epoch=True, sync_dist=True)
+        self.log('val_mse', loss, on_epoch=True, sync_dist=True)
+        self.log('val_pcc', mean_gene_pearson(pred, exp), on_epoch=True, sync_dist=True)
         
     def test_step(self, batch, batch_idx):
         patch, center, exp, mask, label = batch

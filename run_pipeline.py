@@ -277,8 +277,10 @@ from pytorch_lightning.callbacks import Callback
 
 class SimpleProgressBar(Callback):
     def on_train_epoch_end(self, trainer, pl_module):
-        train_loss = trainer.callback_metrics.get('train_loss', 0.0)
-        val_loss = trainer.callback_metrics.get('val_loss', 0.0)
+        train_mse = trainer.callback_metrics.get('train_mse', trainer.callback_metrics.get('train_loss', 0.0))
+        val_mse = trainer.callback_metrics.get('val_mse', trainer.callback_metrics.get('val_loss', 0.0))
+        train_pcc = trainer.callback_metrics.get('train_pcc', float('nan'))
+        val_pcc = trainer.callback_metrics.get('val_pcc', float('nan'))
         current_epoch = trainer.current_epoch
         total_epochs = trainer.max_epochs
         # [SỬA lỗi #10] trainer.optimizers có thể là [] trong một số phiên bản PL vì
@@ -291,7 +293,9 @@ class SimpleProgressBar(Callback):
         lr = opt.param_groups[0]['lr']
         
         # In đúng format bạn muốn
-        print(f"[ep {current_epoch}/{total_epochs}] loss={train_loss:.4f} val_loss={val_loss:.4f} lr={lr:.4e}")
+        print(f"[ep {current_epoch + 1}/{total_epochs}] "
+              f"train_mse={train_mse:.4f} train_pcc={train_pcc:.4f} "
+              f"val_mse={val_mse:.4f} val_pcc={val_pcc:.4f} lr={lr:.4e}")
         
 def section_collate_fn(batch):
     """Thay the default_collate CHI cho truong section_name (str -> giu nguyen 1 chuoi
@@ -402,6 +406,7 @@ trainer = pl.Trainer(
     logger=default_logger,
     log_every_n_steps=10,
     gradient_clip_val=1.0,
+    precision='16-mixed' if torch.cuda.is_available() else '32-true',
     enable_progress_bar=False,      # Tắt progress bar
     enable_model_summary=False,     # Tắt bảng tóm tắt model
 )
@@ -621,6 +626,7 @@ results = pd.DataFrame([{
     'batch_size':     BATCH_SIZE,
     'seed':           42,
     'n_gpus':         N_GPUS,
+    'precision':      '16-mixed' if torch.cuda.is_available() else '32-true',
 }])
 
 print("\n" + "="*60)

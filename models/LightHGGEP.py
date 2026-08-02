@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
+from training_metrics import mean_gene_pearson
 
 class DepthwiseSeparableConv(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
@@ -171,6 +172,8 @@ class LightHGGEP(pl.LightningModule):
         y_hat = self(patch_3ch, positions, section_name, local_indices)
         loss = F.mse_loss(y_hat, exp)
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log('train_mse', loss, on_epoch=True, sync_dist=True)
+        self.log('train_pcc', mean_gene_pearson(y_hat, exp), on_epoch=True, sync_dist=True)
         return loss
     
     def validation_step(self, batch, batch_idx):
@@ -179,6 +182,8 @@ class LightHGGEP(pl.LightningModule):
         loss = F.mse_loss(y_hat, exp)
         self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True,
                  sync_dist=True)
+        self.log('val_mse', loss, on_epoch=True, sync_dist=True)
+        self.log('val_pcc', mean_gene_pearson(y_hat, exp), on_epoch=True, sync_dist=True)
         return loss
     
     def test_step(self, batch, batch_idx):

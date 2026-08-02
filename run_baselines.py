@@ -101,13 +101,15 @@ from predict import stnet_predict, histogene_predict
 
 # ── Callback: log mỗi epoch ra stdout ────────────────────────────────────────
 class EpochProgressBar(Callback):
-    """In 1 dòng tóm tắt sau mỗi epoch: train_loss, val_loss, lr, thời gian."""
+    """In MSE/PCC train-validation và learning rate sau mỗi epoch."""
     def on_train_epoch_end(self, trainer, pl_module):
         m        = trainer.callback_metrics
         ep       = trainer.current_epoch + 1
         total    = trainer.max_epochs
-        t_loss   = m.get("train_loss_epoch", m.get("train_loss", float("nan")))
-        v_loss   = m.get("val_loss",  m.get("valid_loss", float("nan")))
+        t_mse    = m.get("train_mse", m.get("train_loss_epoch", m.get("train_loss", float("nan"))))
+        v_mse    = m.get("val_mse", m.get("val_loss", m.get("valid_loss", float("nan"))))
+        t_pcc    = m.get("train_pcc", float("nan"))
+        v_pcc    = m.get("val_pcc", float("nan"))
         opt      = pl_module.optimizers()
         if isinstance(opt, list):
             opt = opt[0]
@@ -117,8 +119,8 @@ class EpochProgressBar(Callback):
         print(
             f"[{trainer.logger.name}] "
             f"Epoch {ep:3d}/{total}  "
-            f"train_loss={float(t_loss):.4f}  "
-            f"val_loss={float(v_loss):.4f}  "
+            f"train_mse={float(t_mse):.4f}  train_pcc={float(t_pcc):.4f}  "
+            f"val_mse={float(v_mse):.4f}  val_pcc={float(v_pcc):.4f}  "
             f"lr={lr:.2e}",
             flush=True,
         )
@@ -300,6 +302,7 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
             logger=logger,
             log_every_n_steps=10,
             gradient_clip_val=1.0,
+            precision="16-mixed" if accelerator == "gpu" else "32-true",
             enable_progress_bar=False,
             enable_model_summary=False,
             callbacks=[checkpoint_cb, early_stop_cb, EpochProgressBar()],
@@ -430,6 +433,7 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
         "batch_size":    1 if mode == "histogene" else bs,
         "seed":          42,
         "n_gpus":        n_gpus,
+        "precision":     "16-mixed" if torch.cuda.is_available() else "32-true",
     }
 
     summary_csv = "baselines_results.csv"

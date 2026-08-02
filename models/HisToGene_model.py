@@ -5,6 +5,8 @@ from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 import pytorch_lightning as pl
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
+from training_metrics import mean_gene_pearson
 
 class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout = 0.):
@@ -56,9 +58,11 @@ class Attention(nn.Module):
         return self.to_out(out)
 
 class Transformer(nn.Module):
-    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout = 0.):
+    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout = 0.,
+                 gradient_checkpointing=True):
         super().__init__()
         self.norm = nn.LayerNorm(dim)
+        self.gradient_checkpointing = gradient_checkpointing
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
@@ -68,15 +72,25 @@ class Transformer(nn.Module):
 
     def forward(self, x):
         for attn, ff in self.layers:
-            x = attn(x) + x
-            x = ff(x) + x
+            def layer_forward(hidden, attn=attn, ff=ff):
+                hidden = attn(hidden) + hidden
+                return ff(hidden) + hidden
+            # Recompute each transformer block during backward rather than
+            # retaining all activations.  This is essential for slide-level
+            # attention on the largest HER2ST sections on a T4.
+            if self.training and self.gradient_checkpointing and x.requires_grad:
+                x = checkpoint(layer_forward, x, use_reentrant=False)
+            else:
+                x = layer_forward(x)
         return x
 
 class ViT(nn.Module):
-    def __init__(self, *, dim, depth, heads, mlp_dim, dim_head = 64, dropout = 0., emb_dropout = 0.):
+    def __init__(self, *, dim, depth, heads, mlp_dim, dim_head = 64, dropout = 0., emb_dropout = 0.,
+                 gradient_checkpointing=True):
         super().__init__()
         self.dropout = nn.Dropout(emb_dropout)
-        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout,
+                                       gradient_checkpointing=gradient_checkpointing)
         self.to_latent = nn.Identity()
 
     def forward(self, x):
@@ -89,7 +103,8 @@ class ViT(nn.Module):
 class HisToGene(pl.LightningModule):
     def __init__(self, patch_size=112, n_layers=4, n_genes=1000, dim=1024,
                  learning_rate=1e-4, dropout=0.1, n_pos=64,
-                 max_epochs=100, weight_decay=1e-4, min_lr=1e-6):
+                 max_epochs=100, weight_decay=1e-4, min_lr=1e-6,
+                 gradient_checkpointing=True):
         super().__init__()
         self.save_hyperparameters()
         self.learning_rate = learning_rate
@@ -100,7 +115,9 @@ class HisToGene(pl.LightningModule):
         self.patch_embedding = nn.Linear(patch_dim, dim)
         self.x_embed = nn.Embedding(n_pos,dim)
         self.y_embed = nn.Embedding(n_pos,dim)
-        self.vit = ViT(dim=dim, depth=n_layers, heads=16, mlp_dim=2*dim, dropout = dropout, emb_dropout = dropout)
+        self.vit = ViT(dim=dim, depth=n_layers, heads=16, mlp_dim=2*dim,
+                       dropout=dropout, emb_dropout=dropout,
+                       gradient_checkpointing=gradient_checkpointing)
 
         self.gene_head = nn.Sequential(
             nn.LayerNorm(dim),
@@ -121,6 +138,8 @@ class HisToGene(pl.LightningModule):
         pred = self(patch, center)
         loss = F.mse_loss(pred.view_as(exp), exp)
         self.log('train_loss', loss)
+        self.log('train_mse', loss, on_epoch=True, sync_dist=True)
+        self.log('train_pcc', mean_gene_pearson(pred, exp), on_epoch=True, sync_dist=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -128,6 +147,8 @@ class HisToGene(pl.LightningModule):
         pred = self(patch, center)
         loss = F.mse_loss(pred.view_as(exp), exp)
         self.log('valid_loss', loss, on_epoch=True, sync_dist=True)
+        self.log('val_mse', loss, on_epoch=True, sync_dist=True)
+        self.log('val_pcc', mean_gene_pearson(pred, exp), on_epoch=True, sync_dist=True)
         return loss
 
     def test_step(self, batch, batch_idx):
