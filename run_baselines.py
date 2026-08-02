@@ -67,11 +67,14 @@ parser.add_argument("--skip_train", action="store_true",
                     help="Chỉ dùng khi --mode không phải 'all'")
 parser.add_argument("--n_gpus",     type=int,   default=None,
                     help="Số GPU dùng. Mặc định: tối đa 2, giống Light-HGGEP.")
+parser.add_argument("--num_workers", type=int, default=2,
+                    help="DataLoader workers trên mỗi DDP rank (default: 2).")
 args = parser.parse_args()
 
 FOLD    = args.fold
 N_GENES = args.n_genes
 LR      = args.lr
+NUM_WORKERS = args.num_workers
 
 # Số GPU
 n_available = torch.cuda.device_count()
@@ -87,6 +90,7 @@ print("=" * 60)
 print(f"  GPU available : {n_available}  →  dùng {N_GPUS} GPU")
 print(f"  n_genes       : {N_GENES}")
 print(f"  lr            : {LR}")
+print(f"  num_workers   : {NUM_WORKERS} / rank")
 print("=" * 60)
 
 # ── Imports chung ─────────────────────────────────────────────────────────────
@@ -218,13 +222,19 @@ def collate_drop_center(batch):
 # HÀM CHÍNH: chạy train + predict + eval cho 1 mode
 # ─────────────────────────────────────────────────────────────────────────────
 def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
-            ckpt_dir, ckpt_path, skip_train, n_gpus):
+            ckpt_dir, ckpt_path, skip_train, n_gpus, num_workers):
 
     from models.HisToGene_model import HisToGene
     from models.STNet_model import STModel
 
     max_ep = max_epochs if max_epochs is not None else _default_epochs[mode]
     bs     = batch_size if batch_size is not None else _default_bs[mode]
+    loader_options = dict(num_workers=num_workers,
+                          pin_memory=torch.cuda.is_available(),
+                          persistent_workers=num_workers > 0)
+    eval_loader_options = dict(num_workers=num_workers,
+                               pin_memory=torch.cuda.is_available(),
+                               persistent_workers=False)
     ckpt_out_dir = os.path.join(ckpt_dir, mode)
     os.makedirs(ckpt_out_dir, exist_ok=True)
     os.makedirs("figures/kmeans", exist_ok=True)
@@ -290,16 +300,16 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
             # Sections have different spot counts, therefore they cannot be
             # stacked together.  One complete section is one training sample.
             train_loader = DataLoader(train_subset, batch_size=1,
-                                      num_workers=0, shuffle=True)
+                                      shuffle=True, **loader_options)
             val_loader = DataLoader(val_subset, batch_size=1,
-                                    num_workers=0, shuffle=False)
+                                    shuffle=False, **eval_loader_options)
         else:
             train_subset, val_subset = split_train_val(ds_aug, ds_noaug)
             train_loader = DataLoader(train_subset, batch_size=bs,
-                                      num_workers=0, shuffle=True)
+                                      shuffle=True, **loader_options)
             val_loader   = DataLoader(val_subset, batch_size=bs,
-                                      num_workers=0, shuffle=False,
-                                      collate_fn=collate_drop_center)
+                                      shuffle=False, collate_fn=collate_drop_center,
+                                      **eval_loader_options)
 
         if mode == "histogene":
             model = HisToGene(patch_size=112, n_layers=8, n_genes=n_genes,
@@ -353,14 +363,14 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
             ckpt_path, patch_size=112, n_layers=8, n_genes=n_genes,
             learning_rate=lr, max_epochs=max_ep)
         test_loader = DataLoader(test_dataset, batch_size=1,
-                                 num_workers=0, shuffle=False)
+                                 shuffle=False, **eval_loader_options)
         adata_pred, adata_gt = histogene_predict(m, test_loader, device=device)
 
     elif mode == "stnet":
         m = STModel.load_from_checkpoint(
             ckpt_path, n_genes=n_genes, learning_rate=lr, max_epochs=max_ep)
         test_loader = DataLoader(test_dataset, batch_size=bs,
-                                 num_workers=0, shuffle=False)
+                                 shuffle=False, **eval_loader_options)
         adata_pred, adata_gt = stnet_predict(m, test_loader, device=device)
 
     # ── Common, fair evaluation ───────────────────────────────────────────────
@@ -495,6 +505,7 @@ for mode in modes_to_run:
         ckpt_path  = ckpt_p,
         skip_train = skip_train,
         n_gpus     = N_GPUS,
+        num_workers = NUM_WORKERS,
     )
     if result is not None:
         all_results.append(result)

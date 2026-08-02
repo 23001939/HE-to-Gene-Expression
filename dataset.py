@@ -53,7 +53,7 @@ class HER2ST(torch.utils.data.Dataset):
         # LRU cache and open a slide on demand.
         self.img_paths = {i: self.get_img_path(i) for i in self.names}
         self.img_dict = OrderedDict()
-        self.img_cache_size = 2
+        self.img_cache_size = 1
         print('Loading metadata...')
         self.meta_dict = {i:self.get_meta(i) for i in self.names}
         self.label={i:None for i in self.names}
@@ -217,7 +217,7 @@ class LightHGGEP_HER2ST(torch.utils.data.Dataset):
         print('Registering image paths for Light-HGGEP...')
         self.img_paths = {i: self.get_img_path(i) for i in self.names}
         self.img_dict = OrderedDict()
-        self.img_cache_size = 2
+        self.img_cache_size = 1
         
         print('Loading metadata...')
         self.meta_dict = {i: self.get_meta(i) for i in self.names}

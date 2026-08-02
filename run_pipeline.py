@@ -193,6 +193,7 @@ PATIENCE = 15
 LEARNING_RATE = 1e-4
 K_NEIGHBORS = 4
 BATCH_SIZE = 32  # Light-HGGEP rat nhe nen co the tang batch size
+NUM_WORKERS = 2  # per DDP rank (4 loader workers total with 2 GPUs)
 
 CKPT_DIR = "model_ckpts"
 os.makedirs(CKPT_DIR, exist_ok=True)
@@ -204,6 +205,7 @@ print(f"  MAX_EPOCHS = {MAX_EPOCHS}")
 print(f"  PATIENCE = {PATIENCE}")
 print(f"  LEARNING_RATE = {LEARNING_RATE}")
 print(f"  BATCH_SIZE = {BATCH_SIZE}")
+print(f"  NUM_WORKERS = {NUM_WORKERS} per DDP rank")
 
 # ============================================================================
 # ---- Cell 22 (notebook gốc) ----
@@ -371,10 +373,18 @@ val_sampler = SectionBatchSampler(train_dataset, batch_size=BATCH_SIZE, shuffle=
 print(f"DDP data shard: rank {DDP_RANK}/{DDP_WORLD_SIZE}; "
       f"train sections={len(train_sampler.section_names)}, "
       f"train batches={len(train_sampler)}")
-train_loader = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=0,
-                           collate_fn=section_collate_fn)
-val_loader = DataLoader(train_dataset, batch_sampler=val_sampler, num_workers=0,
-                         collate_fn=section_collate_fn)
+loader_options = dict(num_workers=NUM_WORKERS,
+                      pin_memory=torch.cuda.is_available(),
+                      persistent_workers=NUM_WORKERS > 0)
+eval_loader_options = dict(num_workers=NUM_WORKERS,
+                           pin_memory=torch.cuda.is_available(),
+                           # Avoid keeping train and validation worker caches
+                           # alive simultaneously on every DDP rank.
+                           persistent_workers=False)
+train_loader = DataLoader(train_dataset, batch_sampler=train_sampler,
+                           collate_fn=section_collate_fn, **loader_options)
+val_loader = DataLoader(train_dataset, batch_sampler=val_sampler,
+                         collate_fn=section_collate_fn, **eval_loader_options)
 
 # Model
 model = LightHGGEP(
@@ -481,8 +491,8 @@ for section, A_norm in test_dataset.A_norm_cache.items():
 # SectionBatchSampler với shuffle=False đảm bảo mỗi batch CHỈ chứa 1 section và
 # duyệt tuần tự, phù hợp cho inference.
 test_sampler = SectionBatchSampler(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
-test_loader = DataLoader(test_dataset, batch_sampler=test_sampler, num_workers=0,
-                         collate_fn=section_collate_fn)
+test_loader = DataLoader(test_dataset, batch_sampler=test_sampler,
+                         collate_fn=section_collate_fn, **eval_loader_options)
 
 # Predict
 label = test_dataset.label[test_dataset.names[0]]
