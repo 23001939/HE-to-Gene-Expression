@@ -22,7 +22,7 @@ class STLiteConfig:
     
     gcn_k_neighbors: int = 6            # Số hàng xóm trong đồ thị k-NN (Module C)
     gcn_num_layers: int = 2
-    gcn_distance_sigma: float = 180.0
+    gcn_distance_sigma: float = 500.0   # phù hợp với pixel coordinates (~khoảng cách giữa các spot)
     
     num_pathways: int = 32              # Số lượng Pathway (Trưởng phòng)
     total_genes: int = 785              # Tổng số gen mục tiêu cần dự đoán

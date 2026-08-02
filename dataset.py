@@ -137,10 +137,8 @@ class HER2ST(torch.utils.data.Dataset):
         else:
             patch = transforms.ToTensor()(patch)
 
-        if self.train:
-            return patch, loc, exp
-        else: 
-            return patch, loc, exp, torch.Tensor(center)
+        # Luôn trả về center (pixel coords) để dùng cho GCN spatial graph
+        return patch, loc, exp, torch.Tensor(center)
 
     def __len__(self):
         return self.cumlen[-1]
