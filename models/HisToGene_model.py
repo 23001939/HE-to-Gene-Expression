@@ -87,9 +87,15 @@ class ViT(nn.Module):
     
 # adaptation of histogene
 class HisToGene(pl.LightningModule):
-    def __init__(self, patch_size=112, n_layers=4, n_genes=1000, dim=1024, learning_rate=1e-4, dropout=0.1, n_pos=64):
+    def __init__(self, patch_size=112, n_layers=4, n_genes=1000, dim=1024,
+                 learning_rate=1e-4, dropout=0.1, n_pos=64,
+                 max_epochs=100, weight_decay=1e-4, min_lr=1e-6):
         super().__init__()
+        self.save_hyperparameters()
         self.learning_rate = learning_rate
+        self.max_epochs = max_epochs
+        self.weight_decay = weight_decay
+        self.min_lr = min_lr
         patch_dim = 3*patch_size*patch_size
         self.patch_embedding = nn.Linear(patch_dim, dim)
         self.x_embed = nn.Embedding(n_pos,dim)
@@ -131,7 +137,14 @@ class HisToGene(pl.LightningModule):
         self.log('test_loss', loss)
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.learning_rate)
+        optimizer = torch.optim.AdamW(
+            self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=self.max_epochs, eta_min=self.min_lr)
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "epoch"},
+        }
 
     @staticmethod
     def add_model_specific_args(parent_parser):

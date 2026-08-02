@@ -86,7 +86,9 @@ class ImageClassifier(pl.LightningModule):
 
 
 class STModel(pl.LightningModule):
-    def __init__(self, feature_model=None, n_genes=1000, hidden_dim=2048, learning_rate=1e-5, use_mask=False, use_pos=False, cls=False):
+    def __init__(self, feature_model=None, n_genes=1000, hidden_dim=2048,
+                 learning_rate=1e-4, use_mask=False, use_pos=False, cls=False,
+                 max_epochs=100, weight_decay=1e-4, min_lr=1e-6):
         super().__init__()
         self.save_hyperparameters()
         # self.feature_model = None
@@ -102,6 +104,9 @@ class STModel(pl.LightningModule):
         
         self.learning_rate = learning_rate
         self.n_genes = n_genes
+        self.max_epochs = max_epochs
+        self.weight_decay = weight_decay
+        self.min_lr = min_lr
 
     def forward(self, patch, center):
         feature = self.feature_extractor(patch).flatten(1)
@@ -134,8 +139,14 @@ class STModel(pl.LightningModule):
 
     def configure_optimizers(self):
         # self.hparams available because we called self.save_hyperparameters()
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
-        return optimizer
+        optimizer = torch.optim.AdamW(
+            self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=self.max_epochs, eta_min=self.min_lr)
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "epoch"},
+        }
 
     @staticmethod
     def add_model_specific_args(parent_parser):

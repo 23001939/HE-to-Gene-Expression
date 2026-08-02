@@ -4,22 +4,20 @@ run_baselines.py -- Pipeline train / predict / eval cho các mô hình baseline 
 Tất cả baseline dùng HER2ST dataset để so sánh fair với LightHGGEP.
 
 Cách dùng:
-    python run_baselines.py --mode all          # chạy tất cả 4 baseline liên tiếp
+    python run_baselines.py --mode all          # chạy các baseline tương thích liên tiếp
     python run_baselines.py --mode stnet        # chạy riêng 1 model
     python run_baselines.py --mode histogene
-    python run_baselines.py --mode uni
-    python run_baselines.py --mode wsuni
 
 Tùy chọn:
     --fold        : LOOCV fold (default: 5)
     --n_genes     : số gene dự đoán (default: 785)
     --max_epochs  : số epoch tối đa
     --batch_size  : batch size
-    --lr          : learning rate (default: 1e-5)
+    --lr          : learning rate (default: 1e-4, shared budget)
     --ckpt_dir    : thư mục lưu checkpoint (default: model_ckpts)
     --ckpt_path   : load checkpoint sẵn, bỏ qua train (chỉ dùng khi mode != all)
     --skip_train  : chỉ predict+eval (chỉ dùng khi mode != all)
-    --n_gpus      : số GPU dùng (default: 2 nếu có, 1 nếu không)
+    --n_gpus      : số GPU dùng (default: 1, giống Light-HGGEP)
 """
 
 import argparse
@@ -32,7 +30,6 @@ import numpy as np
 import torch
 import pandas as pd
 import matplotlib.pyplot as plt
-import scanpy as sc
 
 warnings.filterwarnings("ignore")
 
@@ -55,20 +52,20 @@ os.chdir(WORKDIR)
 # ── Argument parsing ──────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Baseline pipeline cho HER2ST")
 parser.add_argument("--mode",       type=str, required=True,
-                    choices=["histogene", "stnet", "uni", "all"],
-                    help="Model muốn chạy. 'all' = chạy cả 3 model liên tiếp (không bao gồm wsuni).")
+                    choices=["histogene", "stnet", "all"],
+                    help="Model muốn chạy. 'all' = chạy các baseline tương thích giao thức chung.")
 parser.add_argument("--fold",       type=int,   default=5)
 parser.add_argument("--n_genes",    type=int,   default=785)
 parser.add_argument("--max_epochs", type=int,   default=None)
 parser.add_argument("--batch_size", type=int,   default=None)
-parser.add_argument("--lr",         type=float, default=1e-5)
+parser.add_argument("--lr",         type=float, default=1e-4)
 parser.add_argument("--ckpt_dir",   type=str,   default="model_ckpts")
 parser.add_argument("--ckpt_path",  type=str,   default=None,
                     help="Chỉ dùng khi --mode không phải 'all'")
 parser.add_argument("--skip_train", action="store_true",
                     help="Chỉ dùng khi --mode không phải 'all'")
 parser.add_argument("--n_gpus",     type=int,   default=None,
-                    help="Số GPU dùng. Mặc định: dùng hết GPU có sẵn (tối đa 2).")
+                    help="Số GPU dùng. Mặc định: 1, giống Light-HGGEP.")
 args = parser.parse_args()
 
 FOLD    = args.fold
@@ -80,7 +77,7 @@ n_available = torch.cuda.device_count()
 if args.n_gpus is not None:
     N_GPUS = min(args.n_gpus, n_available)
 else:
-    N_GPUS = min(n_available, 2)   # dùng tối đa 2 GPU, tự động detect
+    N_GPUS = 1                     # Light-HGGEP cũng train trên một GPU
 N_GPUS = max(N_GPUS, 1)           # ít nhất 1
 
 print("=" * 60)
@@ -92,19 +89,15 @@ print(f"  lr            : {LR}")
 print("=" * 60)
 
 # ── Imports chung ─────────────────────────────────────────────────────────────
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Dataset, Subset
 from torch.utils.data.dataloader import default_collate
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, Callback
 from pytorch_lightning.loggers import CSVLogger
 
 from dataset import HER2ST
-from utils import comp_tsne_km
-from predict import (
-    get_R, get_MSE, get_MAE,
-    get_Spearman, get_MoransI_all, cluster_with_nmi,
-    stnet_predict, histogene_predict,
-)
+from evaluation import PROTOCOL_NAME, evaluate_her2st_predictions
+from predict import stnet_predict, histogene_predict
 
 # ── Callback: log mỗi epoch ra stdout ────────────────────────────────────────
 class EpochProgressBar(Callback):
@@ -132,7 +125,37 @@ class EpochProgressBar(Callback):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 _default_epochs = {"histogene": 100, "stnet": 100, "uni": 50, "wsuni": 50}
-_default_bs     = {"histogene": 1,   "stnet": 1,   "uni": 16, "wsuni": 16}
+_default_bs     = {"histogene": 1,   "stnet": 32,  "uni": 16, "wsuni": 16}
+
+
+class HisToGeneSlideDataset(Dataset):
+    """Adapt ``HER2ST`` from spot-level samples to HisToGene slide samples.
+
+    HisToGene applies self-attention across all spots in a section, so one dataset
+    item must represent one section.  The original HER2ST loader returns a 224 px
+    patch per spot, whereas this implementation of HisToGene was built with
+    112 px patches.  We take the centred 112 px crop before flattening it.
+    """
+    def __init__(self, spot_dataset, section_indices):
+        self.spot_dataset = spot_dataset
+        self.section_indices = section_indices
+
+    def __len__(self):
+        return len(self.section_indices)
+
+    def __getitem__(self, index):
+        patches, locations, expressions = [], [], []
+        for spot_index in self.section_indices[index]:
+            item = self.spot_dataset[spot_index]
+            patch, location, expression = item[:3]
+            # HER2ST patches are (3, 224, 224); HisToGene expects 3 * 112 * 112.
+            h, w = patch.shape[-2:]
+            top, left = (h - 112) // 2, (w - 112) // 2
+            patch = patch[:, top:top + 112, left:left + 112]
+            patches.append(patch.flatten())
+            locations.append(location.long().clamp(0, 63))
+            expressions.append(expression)
+        return torch.stack(patches), torch.stack(locations), torch.stack(expressions)
 
 def split_train_val(ds_aug, ds_noaug):
     """
@@ -152,6 +175,22 @@ def split_train_val(ds_aug, ds_noaug):
     return Subset(ds_aug, train_idx), Subset(ds_noaug, val_idx)
 
 
+def split_histo_train_val(ds_aug, ds_noaug):
+    """Return slide-level train/validation datasets for HisToGene."""
+    val_name = sorted(ds_aug.names)[0]
+    sections = []
+    start = 0
+    for i, end in enumerate(ds_aug.cumlen):
+        sections.append((ds_aug.id2name[i], list(range(start, int(end)))))
+        start = int(end)
+    train_sections = [indices for name, indices in sections if name != val_name]
+    val_sections = [indices for name, indices in sections if name == val_name]
+    print(f"  Val slide : {val_name} ({len(val_sections[0])} spots) | "
+          f"Train slides: {len(train_sections)}")
+    return (HisToGeneSlideDataset(ds_aug, train_sections),
+            HisToGeneSlideDataset(ds_noaug, val_sections))
+
+
 def collate_drop_center(batch):
     """
     HER2ST(train=False) trả về 4 phần tử (patch, loc, exp, center).
@@ -168,10 +207,6 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
 
     from models.HisToGene_model import HisToGene
     from models.STNet_model import STModel
-    try:
-        from models.UNI import UNI
-    except ImportError:
-        UNI = None
 
     max_ep = max_epochs if max_epochs is not None else _default_epochs[mode]
     bs     = batch_size if batch_size is not None else _default_bs[mode]
@@ -204,7 +239,7 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
 
     # ── Monitor key ───────────────────────────────────────────────────────────
     _monitor = {
-        "histogene": "val_loss",
+        "histogene": "valid_loss",
         "stnet":     "valid_loss",
         "uni":       "val_loss",
         "wsuni":     "val_loss",
@@ -233,29 +268,27 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
         ds_aug   = HER2ST(train=True, fold=fold)
         ds_noaug = HER2ST(train=True, fold=fold)
         ds_noaug.train = False
-        train_subset, val_subset = split_train_val(ds_aug, ds_noaug)
-
-        train_loader = DataLoader(train_subset, batch_size=bs,
-                                  num_workers=0, shuffle=True)
-        val_loader   = DataLoader(val_subset,   batch_size=bs,
-                                  num_workers=0, shuffle=False,
-                                  collate_fn=collate_drop_center)
+        if mode == "histogene":
+            train_subset, val_subset = split_histo_train_val(ds_aug, ds_noaug)
+            # Sections have different spot counts, therefore they cannot be
+            # stacked together.  One complete section is one training sample.
+            train_loader = DataLoader(train_subset, batch_size=1,
+                                      num_workers=0, shuffle=True)
+            val_loader = DataLoader(val_subset, batch_size=1,
+                                    num_workers=0, shuffle=False)
+        else:
+            train_subset, val_subset = split_train_val(ds_aug, ds_noaug)
+            train_loader = DataLoader(train_subset, batch_size=bs,
+                                      num_workers=0, shuffle=True)
+            val_loader   = DataLoader(val_subset, batch_size=bs,
+                                      num_workers=0, shuffle=False,
+                                      collate_fn=collate_drop_center)
 
         if mode == "histogene":
-            model = HisToGene(n_layers=8, n_genes=n_genes, learning_rate=lr)
+            model = HisToGene(patch_size=112, n_layers=8, n_genes=n_genes,
+                              learning_rate=lr, max_epochs=max_ep)
         elif mode == "stnet":
-            model = STModel(n_genes=n_genes, learning_rate=lr)
-        elif mode == "uni":
-            if UNI is None:
-                print("[SKIP] models.UNI không import được.")
-                return None
-            model = UNI(n_genes=n_genes, learning_rate=lr, max_epochs=max_ep)
-            model.enable_lora_training()
-        elif mode == "wsuni":
-            if WSUNI is None:
-                print("[SKIP] models.WSUNI không import được.")
-                return None
-            model = WSUNI(n_genes=n_genes, learning_rate=lr, max_epochs=max_ep)
+            model = STModel(n_genes=n_genes, learning_rate=lr, max_epochs=max_ep)
 
         trainer = pl.Trainer(
             accelerator=accelerator,
@@ -272,7 +305,7 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
         trainer.fit(model, train_loader, val_loader)
         ckpt_path = checkpoint_cb.best_model_path
         print(f"  Best checkpoint: {ckpt_path}")
-        print(f"  Best val loss  : {checkpoint_callback.best_model_score:.4f}"
+        print(f"  Best val loss  : {checkpoint_cb.best_model_score:.4f}"
               if hasattr(checkpoint_cb, "best_model_score") else "")
 
     else:
@@ -288,59 +321,32 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
 
     if mode == "histogene":
         m = HisToGene.load_from_checkpoint(
-            ckpt_path, n_layers=8, n_genes=n_genes, learning_rate=lr)
+            ckpt_path, patch_size=112, n_layers=8, n_genes=n_genes,
+            learning_rate=lr, max_epochs=max_ep)
         test_loader = DataLoader(test_dataset, batch_size=1,
                                  num_workers=0, shuffle=False)
         adata_pred, adata_gt = histogene_predict(m, test_loader, device=device)
 
     elif mode == "stnet":
         m = STModel.load_from_checkpoint(
-            ckpt_path, n_genes=n_genes, learning_rate=lr)
-        test_loader = DataLoader(test_dataset, batch_size=bs,
-                                 num_workers=0, shuffle=False)
-        adata_pred, adata_gt = stnet_predict(m, test_loader, device=device)
-
-    elif mode == "uni":
-        m = UNI.load_from_checkpoint(
             ckpt_path, n_genes=n_genes, learning_rate=lr, max_epochs=max_ep)
         test_loader = DataLoader(test_dataset, batch_size=bs,
                                  num_workers=0, shuffle=False)
         adata_pred, adata_gt = stnet_predict(m, test_loader, device=device)
 
-    elif mode == "wsuni":
-        m = WSUNI.load_from_checkpoint(
-            ckpt_path, n_genes=n_genes, learning_rate=lr, max_epochs=max_ep)
-        test_loader = DataLoader(test_dataset, batch_size=bs,
-                                 num_workers=0, shuffle=False)
-        adata_pred, adata_gt = stnet_predict(m, test_loader, device=device)
-
-    # ── Post-processing ───────────────────────────────────────────────────────
+    # ── Common, fair evaluation ───────────────────────────────────────────────
     g = list(np.load("data/her_hvg_cut_1000.npy", allow_pickle=True))
-    adata_pred.var_names = g
-    sc.pp.scale(adata_pred)
-    adata_pred = comp_tsne_km(adata_pred, 4)
+    adata_visual, metrics = evaluate_her2st_predictions(
+        adata_pred, adata_gt, g, label=label, n_clusters=4)
+    R, p_values = metrics["R"], metrics["p_values"]
+    Spearman, spearman_pvalues = metrics["Spearman"], metrics["spearman_pvalues"]
+    MSE, MAE, RMSE, morans = metrics["MSE"], metrics["MAE"], metrics["RMSE"], metrics["morans"]
+    mean_pcc, median_pcc = metrics["pearson"], metrics["median_pearson"]
+    mean_spearman, mean_rmse, mean_mae = metrics["spearman"], metrics["rmse"], metrics["mae"]
+    mean_mi_pred, mean_mi_gt = metrics["morans_i_pred"], metrics["morans_i_gt"]
+    ARI, NMI = metrics["ARI"], metrics["NMI"]
 
-    # ── METRICS ───────────────────────────────────────────────────────────────
     print(f"\n  [EVAL] {mode.upper()} fold={fold}")
-    R,        p_values         = get_R(adata_pred, adata_gt)
-    Spearman, spearman_pvalues = get_Spearman(adata_pred, adata_gt)
-    MSE                        = get_MSE(adata_pred, adata_gt)
-    MAE                        = get_MAE(adata_pred, adata_gt)
-    RMSE                       = np.sqrt(MSE)
-    morans                     = get_MoransI_all(adata_pred, adata_gt, top_k=50)
-
-    mean_pcc      = np.nanmean(R)
-    median_pcc    = np.nanmedian(R)
-    mean_spearman = np.nanmean(Spearman)
-    mean_rmse     = np.nanmean(RMSE)
-    mean_mae      = np.nanmean(MAE)
-    mean_mi_pred  = np.nanmean(morans["pred"])
-    mean_mi_gt    = np.nanmean(morans["gt"])
-
-    if label is not None:
-        _, ARI, NMI = cluster_with_nmi(adata_pred, label)
-    else:
-        ARI = NMI = float("nan")
 
     print(f"  PCC={mean_pcc:.4f}  Spearman={mean_spearman:.4f}  "
           f"ARI={ARI:.4f}  NMI={NMI:.4f}")
@@ -362,14 +368,14 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
                 dpi=300, bbox_inches="tight")
     plt.close()
 
-    sc.pl.spatial(adata_pred, img=None, color="kmeans", spot_size=112,
+    sc.pl.spatial(adata_visual, img=None, color="kmeans", spot_size=112,
                   frameon=False, legend_loc=None, title=None, show=False)
     plt.gca().set_title("")
     plt.savefig(f"figures/kmeans/{mode.upper()}_kmeans_fold{fold}.png",
                 dpi=300, bbox_inches="tight", transparent=True)
     plt.clf(); plt.close()
 
-    sc.pl.spatial(adata_pred, img=None, color="FASN", spot_size=112,
+    sc.pl.spatial(adata_visual, img=None, color="FASN", spot_size=112,
                   color_map="magma", frameon=False, legend_loc=None,
                   title=None, show=False)
     plt.gca().set_title("")
@@ -404,6 +410,16 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
         "morans_i_gt":   mean_mi_gt,
         "params":        total_params,
         "ckpt":          ckpt_path,
+        "eval_protocol": PROTOCOL_NAME,
+        "split_rule":    "LOOCV test=fold; validation=first alphabetical train slide",
+        "n_genes":       n_genes,
+        "max_epochs":    max_ep,
+        "learning_rate": lr,
+        "optimizer":     "AdamW(weight_decay=1e-4)",
+        "scheduler":     "CosineAnnealingLR(T_max=max_epochs,eta_min=1e-6)",
+        "batch_size":    1 if mode == "histogene" else bs,
+        "seed":          42,
+        "n_gpus":        n_gpus,
     }
 
     summary_csv = "baselines_results.csv"
@@ -424,7 +440,7 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
 # ─────────────────────────────────────────────────────────────────────────────
 # ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
-ALL_MODES = ["histogene", "stnet", "uni"]   # wsuni bị loại vì không tương thích HER2ST raw image
+ALL_MODES = ["histogene", "stnet"]  # UNI/WSUNI require a distinct multi-scale cached dataset.
 modes_to_run = ALL_MODES if args.mode == "all" else [args.mode]
 
 all_results = []

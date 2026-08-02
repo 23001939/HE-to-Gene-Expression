@@ -404,8 +404,8 @@ print(f"Best validation loss: {checkpoint_callback.best_model_score:.4f}")
 # ============================================================================
 # ---- Cell 27 (notebook gốc) ----
 # ============================================================================
-from predict import lighthggep_predict, get_R, get_MSE, get_MAE, get_Spearman, get_MoransI_all, cluster_with_nmi
-from utils import comp_tsne_km
+from predict import lighthggep_predict
+from evaluation import PROTOCOL_NAME, evaluate_her2st_predictions
 import scanpy as sc
 import numpy as np
 import torch
@@ -444,35 +444,15 @@ test_loader = DataLoader(test_dataset, batch_sampler=test_sampler, num_workers=0
 label = test_dataset.label[test_dataset.names[0]]
 adata_pred, adata_gt = lighthggep_predict(best_model, test_loader, device=device)
 
-# Post-processing
-# [SỬA lỗi #11] scale TRƯỚC comp_tsne_km để PCA/tSNE/KMeans cluster trên dữ liệu đã
-# chuẩn hoá -- nhất quán với metrics (get_R/MSE/MAE cũng tính trên scaled data).
-# Thứ tự cũ (comp_tsne_km → scale) khiến cluster dựa trên unscaled data nhưng report
-# PCC trên scaled data -- mâu thuẫn.
+# Common fair evaluation: metrics are always computed on raw log-normalised
+# expression.  Only the visualisation/clustering copy is standardised.
 g = list(np.load('data/her_hvg_cut_1000.npy', allow_pickle=True))
-adata_pred.var_names = g
-sc.pp.scale(adata_pred)
-adata_pred = comp_tsne_km(adata_pred, 4)
-
-# ==================== TÍNH TOÁN METRICS ====================
-
-# Pearson Correlation cho từng gene
-R, p_values = get_R(adata_pred, adata_gt)
-
-# Spearman Correlation cho từng gene
-Spearman, spearman_pvalues = get_Spearman(adata_pred, adata_gt)
-
-# MSE cho từng gene
-MSE = get_MSE(adata_pred, adata_gt)
-
-# MAE cho từng gene
-MAE = get_MAE(adata_pred, adata_gt)
-
-# RMSE cho từng gene
-RMSE = np.sqrt(MSE)
-
-# Moran's I -- tính trên top-50 gene variance cao nhất (pred và gt)
-morans = get_MoransI_all(adata_pred, adata_gt, top_k=50)
+adata_pred, metrics = evaluate_her2st_predictions(
+    adata_pred, adata_gt, g, label=label, n_clusters=4)
+R, p_values = metrics['R'], metrics['p_values']
+Spearman, spearman_pvalues = metrics['Spearman'], metrics['spearman_pvalues']
+MSE, MAE, RMSE, morans = metrics['MSE'], metrics['MAE'], metrics['RMSE'], metrics['morans']
+ARI, NMI = metrics['ARI'], metrics['NMI']
 
 # ==================== IN KẾT QUẢ CHI TIẾT ====================
 
@@ -482,14 +462,14 @@ print("="*70)
 
 # Thông tin tổng quan
 n_spots = adata_pred.shape[0]
-mean_pcc      = np.nanmean(R)
-median_pcc    = np.nanmedian(R)
+mean_pcc      = metrics['pearson']
+median_pcc    = metrics['median_pearson']
 std_pcc       = np.nanstd(R)
-mean_spearman = np.nanmean(Spearman)
-mean_rmse     = np.nanmean(RMSE)
-mean_mae      = np.nanmean(MAE)
-mean_mi_pred  = np.nanmean(morans['pred'])
-mean_mi_gt    = np.nanmean(morans['gt'])
+mean_spearman = metrics['spearman']
+mean_rmse     = metrics['rmse']
+mean_mae      = metrics['mae']
+mean_mi_pred  = metrics['morans_i_pred']
+mean_mi_gt    = metrics['morans_i_gt']
 
 print(f"  Số spot test đã đánh giá  : {n_spots}")
 print(f"  Số gene đánh giá          : {len(R)}")
@@ -538,11 +518,8 @@ print(f"  Số gene có PCC > 0:  {np.sum(R > 0):,}/{len(R)} ({100*np.sum(R > 0)
 print(f"  Số gene có PCC > 0.2: {np.sum(R > 0.2):,}/{len(R)} ({100*np.sum(R > 0.2)/len(R):.1f}%)")
 print(f"  Số gene có PCC > 0.3: {np.sum(R > 0.3):,}/{len(R)} ({100*np.sum(R > 0.3)/len(R):.1f}%)")
 
-# ARI + NMI
-# [SỬA lỗi #8] label là None nếu section test không nằm trong danh sách có annotation
-# ['A1','B1',...,'H1','J1'] -- cluster_with_nmi() crash với TypeError khi label=None.
+# ARI + NMI (already computed by the shared protocol on the visualisation copy).
 if label is not None:
-    clus, ARI, NMI = cluster_with_nmi(adata_pred, label)
     print(f"\n  [Global structure]")
     print(f"  ARI (Adjusted Rand Index) : {ARI:.4f}")
     print(f"  NMI (Norm. Mutual Info)   : {NMI:.4f}")
@@ -614,6 +591,16 @@ results = pd.DataFrame([{
     'morans_i_gt':    np.nanmean(morans['gt']),
     'params':         total_params,
     'best_val_loss':  float(checkpoint_callback.best_model_score),
+    'eval_protocol':  PROTOCOL_NAME,
+    'split_rule':     'LOOCV test=fold; validation=first alphabetical train slide',
+    'n_genes':        N_GENES,
+    'max_epochs':     MAX_EPOCHS,
+    'learning_rate':  LEARNING_RATE,
+    'optimizer':      'AdamW(weight_decay=1e-4)',
+    'scheduler':      'CosineAnnealingLR(T_max=max_epochs,eta_min=1e-6)',
+    'batch_size':     BATCH_SIZE,
+    'seed':           42,
+    'n_gpus':         1,
 }])
 
 print("\n" + "="*60)

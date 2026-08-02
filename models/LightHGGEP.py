@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 class DepthwiseSeparableConv(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
@@ -194,19 +193,13 @@ class LightHGGEP(pl.LightningModule):
             lr=self.learning_rate,
             weight_decay=1e-4
         )
-        scheduler = ReduceLROnPlateau(
-            optimizer,
-            mode='min',
-            factor=0.5,
-            patience=5,
-            min_lr=1e-7
-        )
+        # Shared optimisation schedule used for the fair baseline comparison.
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=self.max_epochs, eta_min=1e-6)
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "monitor": "val_loss",
                 "interval": "epoch",
-                "frequency": 1
             }
         }

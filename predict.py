@@ -211,9 +211,15 @@ def cluster_with_nmi(adata, label):
       - NMI đo mức độ chia sẻ thông tin giữa 2 phân hoạch, ít bị ảnh hưởng
         bởi số cluster hơn.
     """
-    idx = label != 'undetermined'
-    tmp = adata[idx]
+    label = np.asarray(label)
+    # HER2ST uses integer IDs and marks undetermined spots with -1.  Retain
+    # support for the original string labels used by older datasets.
+    unknown = -1 if np.issubdtype(label.dtype, np.number) else 'undetermined'
+    idx = label != unknown
+    tmp = adata[idx].copy()
     l   = label[idx]
+    if len(l) < 2 or len(np.unique(l)) < 2:
+        return np.array([], dtype=str), float('nan'), float('nan')
     sc.pp.pca(tmp)
     sc.tl.tsne(tmp)
     kmeans = KMeans(n_clusters=len(set(l)), init="k-means++", random_state=0).fit(tmp.obsm['X_pca'])
@@ -300,7 +306,14 @@ def histogene_predict(model, test_loader, device=torch.device('cpu')):
     exps    = torch.cat(all_exps,    dim=0)   # (N, n_genes)
     centers = torch.cat(all_centers, dim=0)   # (N, 2)
 
-    # Flatten patch: (N, 3*H*W) → thêm batch dim → (1, N, patch_dim)
+    # The model was trained with centred 112 px crops (patch_dim=3*112*112).
+    # Keep inference identical even though HER2ST stores 224 px patches.
+    if patches.shape[-2:] != (112, 112):
+        h, w = patches.shape[-2:]
+        top, left = (h - 112) // 2, (w - 112) // 2
+        patches = patches[:, :, top:top + 112, left:left + 112]
+
+    # Flatten patch: (N, 3*112*112) → thêm batch dim → (1, N, patch_dim)
     N = patches.shape[0]
     patch_flat = patches.view(N, -1).unsqueeze(0).to(device)   # (1, N, patch_dim)
 
