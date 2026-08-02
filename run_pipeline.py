@@ -280,6 +280,24 @@ class SimpleProgressBar(Callback):
     def on_train_epoch_start(self, trainer, pl_module):
         self.epoch_started_at = time.perf_counter()
 
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch,
+                           batch_idx):
+        """Reliable textual progress for Kaggle's non-interactive DDP logs."""
+        if not trainer.is_global_zero:
+            return
+        total_batches = trainer.num_training_batches
+        completed = batch_idx + 1
+        report_every = max(1, min(20, total_batches // 10))
+        if completed != 1 and completed != total_batches and completed % report_every:
+            return
+        ratio = completed / max(total_batches, 1)
+        width = 20
+        bar = "#" * int(ratio * width) + "-" * (width - int(ratio * width))
+        elapsed = time.perf_counter() - self.epoch_started_at
+        print(f"[ep {trainer.current_epoch + 1}/{trainer.max_epochs}] "
+              f"[{bar}] {ratio:6.1%} ({completed}/{total_batches} batches) "
+              f"elapsed={elapsed:.0f}s", flush=True)
+
     def on_validation_epoch_end(self, trainer, pl_module):
         # Validation runs after training in each epoch, so this reports the
         # current epoch's MSE/PCC rather than stale validation metrics.
