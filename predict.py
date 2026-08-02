@@ -226,3 +226,99 @@ def cluster_with_nmi(adata, label):
     ari = round(ari_score(p, l), 4)
     nmi = round(nmi_score(p, l, average_method='arithmetic'), 4)
     return p, ari, nmi
+
+
+def stnet_predict(model, test_loader, device=torch.device('cpu')):
+    """
+    Predict function cho STModel dùng HER2ST dataset.
+    HER2ST test trả về: (patch, loc, exp, center)
+      - patch  : (B, 3, 224, 224)
+      - loc    : (B, 2)  -- tọa độ grid (x, y)
+      - exp    : (B, n_genes)
+      - center : (B, 2)  -- tọa độ pixel
+    STModel.forward(patch, center) → pred (B, n_genes)
+    """
+    model.eval()
+    model = model.to(device)
+    preds, gts, centers = [], [], []
+
+    with torch.no_grad():
+        for batch in tqdm(test_loader, desc="STNet Predicting"):
+            patch, loc, exp, center = batch
+            patch  = patch.to(device)
+            center = center.to(device)
+            pred   = model(patch, center)
+            preds.append(pred.cpu())
+            gts.append(exp)
+            centers.append(center.cpu())
+
+    preds   = torch.cat(preds,   dim=0).numpy()
+    gts     = torch.cat(gts,     dim=0).numpy()
+    centers = torch.cat(centers, dim=0).numpy()
+
+    adata_pred = ann.AnnData(preds)
+    adata_pred.obsm['spatial'] = centers
+
+    adata_gt = ann.AnnData(gts)
+    adata_gt.obsm['spatial'] = centers
+
+    return adata_pred, adata_gt
+
+
+def histogene_predict(model, test_loader, device=torch.device('cpu')):
+    """
+    Predict function cho HisToGene dùng HER2ST dataset.
+
+    HisToGene.forward(patches, centers) kỳ vọng input slide-level:
+      patches : (1, N_spots, patch_dim)   -- flatten từng patch
+      centers : (1, N_spots, 2)           -- tọa độ grid đã discretize
+
+    HER2ST test trả về patch-level: (patch, loc, exp, center)
+      patch  : (B, 3, H, W)
+      loc    : (B, 2)   -- tọa độ grid float
+      exp    : (B, n_genes)
+      center : (B, 2)   -- tọa độ pixel
+
+    Chiến lược: gom toàn bộ spots của test section vào 1 batch slide,
+    flatten patch và discretize loc sang index để dùng Embedding.
+    Vì test chỉ có 1 section (LOOCV), load hết rồi forward 1 lần.
+    """
+    model.eval()
+    model = model.to(device)
+
+    all_patches, all_locs, all_exps, all_centers = [], [], [], []
+    for batch in test_loader:
+        patch, loc, exp, center = batch
+        all_patches.append(patch)
+        all_locs.append(loc)
+        all_exps.append(exp)
+        all_centers.append(center)
+
+    # Gom thành 1 tensor
+    patches = torch.cat(all_patches, dim=0)   # (N, 3, H, W)
+    locs    = torch.cat(all_locs,    dim=0)   # (N, 2)
+    exps    = torch.cat(all_exps,    dim=0)   # (N, n_genes)
+    centers = torch.cat(all_centers, dim=0)   # (N, 2)
+
+    # Flatten patch: (N, 3*H*W) → thêm batch dim → (1, N, patch_dim)
+    N = patches.shape[0]
+    patch_flat = patches.view(N, -1).unsqueeze(0).to(device)   # (1, N, patch_dim)
+
+    # Discretize tọa độ grid sang long index cho Embedding
+    # HisToGene dùng n_pos=64 → clamp về [0, 63]
+    locs_long = locs.long().clamp(0, 63).unsqueeze(0).to(device)  # (1, N, 2)
+
+    with torch.no_grad():
+        pred = model(patch_flat, locs_long)   # (1, N, n_genes)
+    pred = pred.squeeze(0).cpu().numpy()      # (N, n_genes)
+
+    centers_np = centers.numpy()
+    exps_np    = exps.numpy()
+
+    adata_pred = ann.AnnData(pred)
+    adata_pred.obsm['spatial'] = centers_np
+
+    adata_gt = ann.AnnData(exps_np)
+    adata_gt.obsm['spatial'] = centers_np
+
+    return adata_pred, adata_gt
