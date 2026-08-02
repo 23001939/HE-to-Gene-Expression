@@ -315,7 +315,9 @@ def histogene_predict(model, test_loader, device=torch.device('cpu')):
 
     # Flatten patch: (N, 3*112*112) → thêm batch dim → (1, N, patch_dim)
     N = patches.shape[0]
-    patch_flat = patches.view(N, -1).unsqueeze(0).to(device)   # (1, N, patch_dim)
+    # Centre-cropping can create a non-contiguous tensor; reshape preserves
+    # values while safely flattening it for the patch embedding.
+    patch_flat = patches.reshape(N, -1).unsqueeze(0).to(device)  # (1, N, patch_dim)
 
     # Discretize tọa độ grid sang long index cho Embedding
     # HisToGene dùng n_pos=64 → clamp về [0, 63]

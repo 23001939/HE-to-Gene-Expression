@@ -276,8 +276,10 @@ class SectionBatchSampler(Sampler):
 from pytorch_lightning.callbacks import Callback
 
 class SimpleProgressBar(Callback):
-    def on_train_epoch_end(self, trainer, pl_module):
-        if not trainer.is_global_zero:
+    def on_validation_epoch_end(self, trainer, pl_module):
+        # Validation runs after training in each epoch, so this reports the
+        # current epoch's MSE/PCC rather than stale validation metrics.
+        if trainer.sanity_checking or not trainer.is_global_zero:
             return
         train_mse = trainer.callback_metrics.get('train_mse', trainer.callback_metrics.get('train_loss', 0.0))
         val_mse = trainer.callback_metrics.get('val_mse', trainer.callback_metrics.get('val_loss', 0.0))
@@ -400,7 +402,9 @@ checkpoint_callback = ModelCheckpoint(
 trainer = pl.Trainer(
     accelerator='gpu' if torch.cuda.is_available() else 'cpu',
     devices=N_GPUS,
-    strategy='ddp_find_unused_parameters_true' if N_GPUS > 1 else 'auto',
+    # LightHGGEP uses every parameter in its forward loss path; plain DDP avoids
+    # the unnecessary autograd traversal warned about by find_unused_parameters.
+    strategy='ddp' if N_GPUS > 1 else 'auto',
     # SectionBatchSampler shards whole spatial sections itself.
     use_distributed_sampler=False,
     max_epochs=MAX_EPOCHS,
