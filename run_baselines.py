@@ -17,7 +17,7 @@ Tùy chọn:
     --ckpt_dir    : thư mục lưu checkpoint (default: model_ckpts)
     --ckpt_path   : load checkpoint sẵn, bỏ qua train (chỉ dùng khi mode != all)
     --skip_train  : chỉ predict+eval (chỉ dùng khi mode != all)
-    --n_gpus      : số GPU dùng (default: 1, giống Light-HGGEP)
+    --n_gpus      : số GPU dùng (default: tối đa 2, giống Light-HGGEP)
 """
 
 import argparse
@@ -65,7 +65,7 @@ parser.add_argument("--ckpt_path",  type=str,   default=None,
 parser.add_argument("--skip_train", action="store_true",
                     help="Chỉ dùng khi --mode không phải 'all'")
 parser.add_argument("--n_gpus",     type=int,   default=None,
-                    help="Số GPU dùng. Mặc định: 1, giống Light-HGGEP.")
+                    help="Số GPU dùng. Mặc định: tối đa 2, giống Light-HGGEP.")
 args = parser.parse_args()
 
 FOLD    = args.fold
@@ -77,7 +77,7 @@ n_available = torch.cuda.device_count()
 if args.n_gpus is not None:
     N_GPUS = min(args.n_gpus, n_available)
 else:
-    N_GPUS = 1                     # Light-HGGEP cũng train trên một GPU
+    N_GPUS = min(n_available, 2)
 N_GPUS = max(N_GPUS, 1)           # ít nhất 1
 
 print("=" * 60)
@@ -224,7 +224,7 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
     # DataParallel (dp): chạy trên 1 process, chia batch sang các GPU.
     # Đơn giản, không cần spawn, không conflict với num_workers=0.
     # DDP sẽ nhanh hơn nhưng cần multi-process → phức tạp hơn khi chạy từ script.
-    if n_gpus > 1:
+    if n_gpus > 1 and not skip_train:
         strategy = "ddp"
         accelerator = "gpu"
         devices = n_gpus
@@ -311,6 +311,14 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
     else:
         if ckpt_path is None:
             raise ValueError(f"--skip_train yêu cầu --ckpt_path cho mode={mode}")
+
+    # Every DDP rank trains; only rank zero may perform the canonical inference
+    # and write CSV/figures.  Other ranks wait so modes stay in lockstep.
+    if n_gpus > 1 and not skip_train:
+        trainer.strategy.barrier()
+        if not trainer.is_global_zero:
+            trainer.strategy.barrier()
+            return None
 
     # ── PREDICT ───────────────────────────────────────────────────────────────
     print(f"\n  [PREDICT] Load: {ckpt_path}")
@@ -433,6 +441,9 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
         summary = new_row
     summary.to_csv(summary_csv, index=False)
     print(f"  Saved summary → {summary_csv}")
+
+    if n_gpus > 1 and not skip_train:
+        trainer.strategy.barrier()
 
     return result
 

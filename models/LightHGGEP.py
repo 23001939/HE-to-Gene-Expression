@@ -177,7 +177,8 @@ class LightHGGEP(pl.LightningModule):
         patch_3ch, positions, exp, section_name, local_indices = batch
         y_hat = self(patch_3ch, positions, section_name, local_indices)
         loss = F.mse_loss(y_hat, exp)
-        self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True,
+                 sync_dist=True)
         return loss
     
     def test_step(self, batch, batch_idx):

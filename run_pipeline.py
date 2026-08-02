@@ -41,6 +41,8 @@ set_seed(42)
 print("CUDA available:", torch.cuda.is_available())
 if torch.cuda.is_available():
     print("GPU:", torch.cuda.get_device_name(0))
+N_GPUS = min(torch.cuda.device_count(), 2) if torch.cuda.is_available() else 1
+print("GPUs used for fair comparison:", N_GPUS)
 
 # ============================================================================
 # ---- Cell 4 (notebook gốc) ----
@@ -230,7 +232,8 @@ from torch.utils.data import Sampler
 
 class SectionBatchSampler(Sampler):
     def __init__(self, dataset, batch_size, shuffle=True,
-                 include_sections=None, exclude_sections=None):
+                 include_sections=None, exclude_sections=None,
+                 rank=0, num_replicas=1, shard_sections=True):
         self.batch_size = batch_size
         self.shuffle = shuffle
 
@@ -250,6 +253,10 @@ class SectionBatchSampler(Sampler):
         
         # Lưu danh sách section names để shuffle
         self.section_names = list(self.section_indices.keys())
+        # A rank owns complete sections: spatial graphs are never split across
+        # GPUs. Validation/test remain replicated for synchronized evaluation.
+        if shard_sections and num_replicas > 1:
+            self.section_names = self.section_names[rank::num_replicas]
 
     def __iter__(self):
         section_names = self.section_names.copy()
@@ -335,10 +342,14 @@ train_dataset = LightHGGEP_HER2ST(train=True, fold=FOLD, k_neighbors=K_NEIGHBORS
 VAL_SECTION = sorted(train_dataset.names)[0]
 print(f"Slide dùng làm validation (tách từ tập train, KHÔNG phải test_dataset): {VAL_SECTION}")
 
+DDP_RANK = int(os.environ.get("LOCAL_RANK", 0))
+DDP_WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
 train_sampler = SectionBatchSampler(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
-                                     exclude_sections=[VAL_SECTION])
+                                     exclude_sections=[VAL_SECTION], rank=DDP_RANK,
+                                     num_replicas=DDP_WORLD_SIZE, shard_sections=True)
 val_sampler = SectionBatchSampler(train_dataset, batch_size=BATCH_SIZE, shuffle=False,
-                                   include_sections=[VAL_SECTION])
+                                   include_sections=[VAL_SECTION], rank=DDP_RANK,
+                                   num_replicas=DDP_WORLD_SIZE, shard_sections=False)
 train_loader = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=0,
                            collate_fn=section_collate_fn)
 val_loader = DataLoader(train_dataset, batch_sampler=val_sampler, num_workers=0,
@@ -382,7 +393,10 @@ checkpoint_callback = ModelCheckpoint(
 # Trainer
 trainer = pl.Trainer(
     accelerator='gpu' if torch.cuda.is_available() else 'cpu',
-    devices=1,
+    devices=N_GPUS,
+    strategy='ddp' if N_GPUS > 1 else 'auto',
+    # SectionBatchSampler shards whole spatial sections itself.
+    use_distributed_sampler=False,
     max_epochs=MAX_EPOCHS,
     callbacks=[early_stop_callback, checkpoint_callback, SimpleProgressBar()],
     logger=default_logger,
@@ -394,6 +408,12 @@ trainer = pl.Trainer(
 
 # Train
 trainer.fit(model, train_loader, val_loader)
+
+# Only rank zero performs the single canonical test evaluation and writes files.
+trainer.strategy.barrier()
+if not trainer.is_global_zero:
+    trainer.strategy.barrier()
+    raise SystemExit(0)
 
 # Load best checkpoint
 best_ckpt_path = checkpoint_callback.best_model_path
@@ -600,7 +620,7 @@ results = pd.DataFrame([{
     'scheduler':      'CosineAnnealingLR(T_max=max_epochs,eta_min=1e-6)',
     'batch_size':     BATCH_SIZE,
     'seed':           42,
-    'n_gpus':         1,
+    'n_gpus':         N_GPUS,
 }])
 
 print("\n" + "="*60)
@@ -620,3 +640,4 @@ print("Checkpoints da luu trong:")
 subprocess.run(f"ls -la {CKPT_DIR}", shell=True)  # [DỊCH TỪ IPYTHON] gốc: !ls -la {CKPT_DIR}
 print(f"\nBest checkpoint: {best_ckpt_path}")
 print("\nDe su dung lai session sau, vao tab Output > New Dataset tu thu muc model_ckpts/")
+trainer.strategy.barrier()

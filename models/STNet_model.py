@@ -59,7 +59,7 @@ class ImageClassifier(pl.LightningModule):
         preds = torch.argmax(logits, dim=1)
         acc = accuracy(preds, y)
         
-        self.log('valid_loss', loss)
+        self.log('valid_loss', loss, on_epoch=True, sync_dist=True)
         self.log('valid_acc', acc)
 
     def test_step(self, batch, batch_idx):
@@ -125,7 +125,7 @@ class STModel(pl.LightningModule):
         patch, center, exp = batch
         pred = self(patch, center)
         loss = F.mse_loss(pred, exp)
-        self.log('valid_loss', loss)
+        self.log('valid_loss', loss, on_epoch=True, sync_dist=True)
         
     def test_step(self, batch, batch_idx):
         patch, center, exp, mask, label = batch

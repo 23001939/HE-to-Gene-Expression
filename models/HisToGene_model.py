@@ -127,7 +127,7 @@ class HisToGene(pl.LightningModule):
         patch, center, exp = batch
         pred = self(patch, center)
         loss = F.mse_loss(pred.view_as(exp), exp)
-        self.log('valid_loss', loss)
+        self.log('valid_loss', loss, on_epoch=True, sync_dist=True)
         return loss
 
     def test_step(self, batch, batch_idx):
