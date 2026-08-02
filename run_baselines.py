@@ -53,11 +53,10 @@ set_seed(42)
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # ── Working directory ─────────────────────────────────────────────────────────
-# Luôn chdir về thư mục chứa script (REPO_ROOT) để các đường dẫn tương đối
-# như 'data/her_hvg_cut_1000.npy' và 'data/her2st/' hoạt động đúng.
-# Khác với run_pipeline.py (được copy thẳng vào /kaggle/working/ nên chdir
-# về /kaggle/working/ là hợp lý), run_baselines.py nằm trong REPO_ROOT.
-WORKDIR = str(pathlib.Path(__file__).parent.resolve())
+if os.path.isdir("/kaggle/working"):
+    WORKDIR = "/kaggle/working"
+else:
+    WORKDIR = str(pathlib.Path(__file__).parent.resolve())
 os.chdir(WORKDIR)
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
