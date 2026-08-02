@@ -53,10 +53,12 @@ set_seed(42)
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # ── Working directory ─────────────────────────────────────────────────────────
-if os.path.isdir("/kaggle/working"):
-    WORKDIR = "/kaggle/working"
-else:
-    WORKDIR = str(pathlib.Path(__file__).parent.resolve())
+# Luôn chdir về thư mục chứa script để các đường dẫn tương đối
+# 'data/', 'model_ckpts/', 'figures/' đều resolve đúng bất kể chạy từ đâu
+# (local, Kaggle notebook gọi qua `python /path/to/run_baselines.py`).
+# run_pipeline.py dùng /kaggle/working vì nó được copy thẳng ra đó;
+# run_baselines.py nằm trong REPO_ROOT nên phải dùng __file__.
+WORKDIR = str(pathlib.Path(__file__).parent.resolve())
 os.chdir(WORKDIR)
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
