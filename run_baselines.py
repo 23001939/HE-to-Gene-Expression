@@ -1,16 +1,11 @@
 """
 run_baselines.py -- Pipeline train / predict / eval cho các mô hình baseline trên HER2ST.
 
-Tất cả baseline đều dùng HER2ST làm dataset chung để so sánh fair với LightHGGEP.
-
-Baseline được hỗ trợ:
-    - histogene : HisToGene  (slide-level ViT, flatten patches)
-    - stnet     : ST-Net     (ResNet patch-level)
-    - uni       : UNI        (ViT foundation model + LoRA, patch-level)
-    - wsuni     : WSUNI      (Whole-slide UNI, patch-level với HER2ST)
+Tất cả baseline dùng HER2ST dataset để so sánh fair với LightHGGEP.
 
 Cách dùng:
-    python run_baselines.py --mode stnet
+    python run_baselines.py --mode all          # chạy tất cả 4 baseline liên tiếp
+    python run_baselines.py --mode stnet        # chạy riêng 1 model
     python run_baselines.py --mode histogene
     python run_baselines.py --mode uni
     python run_baselines.py --mode wsuni
@@ -22,8 +17,9 @@ Tùy chọn:
     --batch_size  : batch size
     --lr          : learning rate (default: 1e-5)
     --ckpt_dir    : thư mục lưu checkpoint (default: model_ckpts)
-    --ckpt_path   : load checkpoint sẵn, bỏ qua train
-    --skip_train  : chỉ predict+eval (cần --ckpt_path)
+    --ckpt_path   : load checkpoint sẵn, bỏ qua train (chỉ dùng khi mode != all)
+    --skip_train  : chỉ predict+eval (chỉ dùng khi mode != all)
+    --n_gpus      : số GPU dùng (default: 2 nếu có, 1 nếu không)
 """
 
 import argparse
@@ -40,7 +36,7 @@ import scanpy as sc
 
 warnings.filterwarnings("ignore")
 
-# ── Reproducibility ──────────────────────────────────────────────────────────
+# ── Reproducibility ───────────────────────────────────────────────────────────
 def set_seed(seed: int = 42):
     random.seed(seed)
     np.random.seed(seed)
@@ -53,64 +49,55 @@ set_seed(42)
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # ── Working directory ─────────────────────────────────────────────────────────
-# Luôn chdir về thư mục chứa script để các đường dẫn tương đối
-# 'data/', 'model_ckpts/', 'figures/' đều resolve đúng bất kể chạy từ đâu
-# (local, Kaggle notebook gọi qua `python /path/to/run_baselines.py`).
-# run_pipeline.py dùng /kaggle/working vì nó được copy thẳng ra đó;
-# run_baselines.py nằm trong REPO_ROOT nên phải dùng __file__.
 WORKDIR = str(pathlib.Path(__file__).parent.resolve())
 os.chdir(WORKDIR)
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Baseline pipeline cho HER2ST")
 parser.add_argument("--mode",       type=str, required=True,
-                    choices=["histogene", "stnet", "uni", "wsuni"])
+                    choices=["histogene", "stnet", "uni", "all"],
+                    help="Model muốn chạy. 'all' = chạy cả 3 model liên tiếp (không bao gồm wsuni).")
 parser.add_argument("--fold",       type=int,   default=5)
 parser.add_argument("--n_genes",    type=int,   default=785)
 parser.add_argument("--max_epochs", type=int,   default=None)
 parser.add_argument("--batch_size", type=int,   default=None)
 parser.add_argument("--lr",         type=float, default=1e-5)
 parser.add_argument("--ckpt_dir",   type=str,   default="model_ckpts")
-parser.add_argument("--ckpt_path",  type=str,   default=None)
-parser.add_argument("--skip_train", action="store_true")
+parser.add_argument("--ckpt_path",  type=str,   default=None,
+                    help="Chỉ dùng khi --mode không phải 'all'")
+parser.add_argument("--skip_train", action="store_true",
+                    help="Chỉ dùng khi --mode không phải 'all'")
+parser.add_argument("--n_gpus",     type=int,   default=None,
+                    help="Số GPU dùng. Mặc định: dùng hết GPU có sẵn (tối đa 2).")
 args = parser.parse_args()
 
-MODE   = args.mode
-FOLD   = args.fold
+FOLD    = args.fold
 N_GENES = args.n_genes
-LR     = args.lr
-CKPT_DIR = os.path.join(args.ckpt_dir, MODE)
-os.makedirs(CKPT_DIR, exist_ok=True)
-os.makedirs("figures/kmeans", exist_ok=True)
-os.makedirs("figures/FASN",   exist_ok=True)
+LR      = args.lr
 
-_default_epochs = {"histogene": 100, "stnet": 100, "uni": 50, "wsuni": 50}
-_default_bs     = {"histogene": 1,   "stnet": 1,   "uni": 16, "wsuni": 16}
-MAX_EPOCHS = args.max_epochs if args.max_epochs is not None else _default_epochs[MODE]
-BATCH_SIZE = args.batch_size if args.batch_size is not None else _default_bs[MODE]
+# Số GPU
+n_available = torch.cuda.device_count()
+if args.n_gpus is not None:
+    N_GPUS = min(args.n_gpus, n_available)
+else:
+    N_GPUS = min(n_available, 2)   # dùng tối đa 2 GPU, tự động detect
+N_GPUS = max(N_GPUS, 1)           # ít nhất 1
 
 print("=" * 60)
-print(f"BASELINE PIPELINE: {MODE.upper()}")
+print(f"BASELINE PIPELINE  mode={args.mode.upper()}  fold={FOLD}")
 print("=" * 60)
-print(f"  fold        = {FOLD}")
-print(f"  n_genes     = {N_GENES}")
-print(f"  max_epochs  = {MAX_EPOCHS}")
-print(f"  batch_size  = {BATCH_SIZE}")
-print(f"  lr          = {LR}")
-print(f"  skip_train  = {args.skip_train}")
+print(f"  GPU available : {n_available}  →  dùng {N_GPUS} GPU")
+print(f"  n_genes       : {N_GENES}")
+print(f"  lr            : {LR}")
 print("=" * 60)
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Device:", device)
 
 # ── Imports chung ─────────────────────────────────────────────────────────────
 from torch.utils.data import DataLoader, Subset
 from torch.utils.data.dataloader import default_collate
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, Callback
 from pytorch_lightning.loggers import CSVLogger
 
-# Tất cả baseline dùng HER2ST
 from dataset import HER2ST
 from utils import comp_tsne_km
 from predict import (
@@ -119,23 +106,39 @@ from predict import (
     stnet_predict, histogene_predict,
 )
 
-# Import model theo mode
-if MODE == "histogene":
-    from models.HisToGene_model import HisToGene
-elif MODE == "stnet":
-    from models.STNet_model import STModel
-elif MODE == "uni":
-    from models.UNI import UNI
-elif MODE == "wsuni":
-    from models.WSUNI import WSUNI
+# ── Callback: log mỗi epoch ra stdout ────────────────────────────────────────
+class EpochProgressBar(Callback):
+    """In 1 dòng tóm tắt sau mỗi epoch: train_loss, val_loss, lr, thời gian."""
+    def on_train_epoch_end(self, trainer, pl_module):
+        m        = trainer.callback_metrics
+        ep       = trainer.current_epoch + 1
+        total    = trainer.max_epochs
+        t_loss   = m.get("train_loss_epoch", m.get("train_loss", float("nan")))
+        v_loss   = m.get("val_loss",  m.get("valid_loss", float("nan")))
+        opt      = pl_module.optimizers()
+        if isinstance(opt, list):
+            opt = opt[0]
+        lr = opt.param_groups[0]["lr"]
+        # Thời gian epoch
+        elapsed = trainer.fit_loop.epoch_loop.batch_progress.total.completed
+        print(
+            f"[{trainer.logger.name}] "
+            f"Epoch {ep:3d}/{total}  "
+            f"train_loss={float(t_loss):.4f}  "
+            f"val_loss={float(v_loss):.4f}  "
+            f"lr={lr:.2e}",
+            flush=True,
+        )
 
-# ── Helper: tách val subset ───────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
+_default_epochs = {"histogene": 100, "stnet": 100, "uni": 50, "wsuni": 50}
+_default_bs     = {"histogene": 1,   "stnet": 1,   "uni": 16, "wsuni": 16}
+
 def split_train_val(ds_aug, ds_noaug):
     """
     Tách slide đầu alphabet làm val, còn lại làm train.
     ds_aug   : HER2ST(train=True)  → có augmentation → train_loader
     ds_noaug : HER2ST(train=True) với .train=False → không augment → val_loader
-    Index tính theo tên slide (tránh set-order bug của Python).
     """
     val_name  = sorted(ds_aug.names)[0]
     name2idx  = {name: i for i, name in ds_aug.id2name.items()}
@@ -149,326 +152,312 @@ def split_train_val(ds_aug, ds_noaug):
     return Subset(ds_aug, train_idx), Subset(ds_noaug, val_idx)
 
 
-# collate_fn cho val_loader của histogene/stnet:
-# HER2ST(train=False) trả về (patch, loc, exp, center) -- 4 phần tử,
-# nhưng validation_step của 2 model này unpack (patch, loc, exp) -- 3 phần tử.
 def collate_drop_center(batch):
+    """
+    HER2ST(train=False) trả về 4 phần tử (patch, loc, exp, center).
+    validation_step của HisToGene/STNet unpack 3 phần tử → drop center.
+    """
     return default_collate([item[:3] for item in batch])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PHẦN 1: TRAIN
+# HÀM CHÍNH: chạy train + predict + eval cho 1 mode
 # ─────────────────────────────────────────────────────────────────────────────
-ckpt_path = args.ckpt_path
+def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
+            ckpt_dir, ckpt_path, skip_train, n_gpus):
 
-if not args.skip_train:
+    from models.HisToGene_model import HisToGene
+    from models.STNet_model import STModel
+    try:
+        from models.UNI import UNI
+    except ImportError:
+        UNI = None
+
+    max_ep = max_epochs if max_epochs is not None else _default_epochs[mode]
+    bs     = batch_size if batch_size is not None else _default_bs[mode]
+    ckpt_out_dir = os.path.join(ckpt_dir, mode)
+    os.makedirs(ckpt_out_dir, exist_ok=True)
+    os.makedirs("figures/kmeans", exist_ok=True)
+    os.makedirs("figures/FASN",   exist_ok=True)
+
     print(f"\n{'='*60}")
-    print("BƯỚC 1: TRAIN")
+    print(f"  MODEL : {mode.upper()}")
+    print(f"  epochs={max_ep}  batch={bs}  lr={lr}  gpus={n_gpus}")
     print(f"{'='*60}")
 
-    logger = CSVLogger("logs", name=f"baseline_{MODE}")
+    # ── Strategy cho multi-GPU ────────────────────────────────────────────────
+    # DataParallel (dp): chạy trên 1 process, chia batch sang các GPU.
+    # Đơn giản, không cần spawn, không conflict với num_workers=0.
+    # DDP sẽ nhanh hơn nhưng cần multi-process → phức tạp hơn khi chạy từ script.
+    if n_gpus > 1:
+        strategy = "dp"
+        accelerator = "gpu"
+        devices = n_gpus
+    elif torch.cuda.is_available():
+        strategy = "auto"
+        accelerator = "gpu"
+        devices = 1
+    else:
+        strategy = "auto"
+        accelerator = "cpu"
+        devices = 1
 
-    # STModel log 'valid_loss', HisToGene/UNI/WSUNI log 'val_loss'
-    # → monitor key khác nhau theo model
-    _monitor_key = {
+    # ── Monitor key ───────────────────────────────────────────────────────────
+    _monitor = {
         "histogene": "val_loss",
         "stnet":     "valid_loss",
         "uni":       "val_loss",
         "wsuni":     "val_loss",
     }
-    monitor = _monitor_key[MODE]
+    monitor = _monitor[mode]
 
-    checkpoint_cb = ModelCheckpoint(
-        dirpath=CKPT_DIR,
-        filename=f"{MODE}_fold{FOLD}_" + "{epoch:02d}",
-        save_top_k=3,
-        monitor=monitor,
-        mode="min",
-        save_last=True,
-    )
-    early_stop_cb = EarlyStopping(
-        monitor=monitor,
-        patience=15,       # đồng nhất với LightHGGEP
-        mode="min",
-        verbose=True,
-    )
+    # ── TRAIN ─────────────────────────────────────────────────────────────────
+    if not skip_train:
+        logger = CSVLogger("logs", name=f"baseline_{mode}")
 
-    trainer_kwargs = dict(
-        accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        devices=1,
-        max_epochs=MAX_EPOCHS,
-        logger=logger,
-        log_every_n_steps=10,
-        gradient_clip_val=1.0,   # đồng nhất với LightHGGEP
-        enable_progress_bar=True,
-        enable_model_summary=False,
-        callbacks=[checkpoint_cb, early_stop_cb],
-    )
+        checkpoint_cb = ModelCheckpoint(
+            dirpath=ckpt_out_dir,
+            filename=f"{mode}_fold{fold}_" + "{epoch:02d}",
+            save_top_k=3,
+            monitor=monitor,
+            mode="min",
+            save_last=True,
+        )
+        early_stop_cb = EarlyStopping(
+            monitor=monitor,
+            patience=15,
+            mode="min",
+            verbose=False,
+        )
 
-    # ── Load 2 bản dataset: 1 augment (train), 1 không augment (val) ──────────
-    ds_aug   = HER2ST(train=True, fold=FOLD)
-    ds_noaug = HER2ST(train=True, fold=FOLD)
-    ds_noaug.train = False   # tắt augmentation, __getitem__ trả về format test
+        ds_aug   = HER2ST(train=True, fold=fold)
+        ds_noaug = HER2ST(train=True, fold=fold)
+        ds_noaug.train = False
+        train_subset, val_subset = split_train_val(ds_aug, ds_noaug)
 
-    train_subset, val_subset = split_train_val(ds_aug, ds_noaug)
-
-    if MODE == "histogene":
-        # HisToGene validation_step unpack (patch, loc, exp) — 3 phần tử
-        # HER2ST(train=False) trả về 4 phần tử → dùng collate_drop_center
-        train_loader = DataLoader(train_subset, batch_size=BATCH_SIZE,
+        train_loader = DataLoader(train_subset, batch_size=bs,
                                   num_workers=0, shuffle=True)
-        val_loader   = DataLoader(val_subset,   batch_size=BATCH_SIZE,
+        val_loader   = DataLoader(val_subset,   batch_size=bs,
                                   num_workers=0, shuffle=False,
                                   collate_fn=collate_drop_center)
-        model = HisToGene(n_layers=8, n_genes=N_GENES, learning_rate=LR)
 
-    elif MODE == "stnet":
-        # STModel validation_step unpack (patch, loc, exp) — 3 phần tử
-        train_loader = DataLoader(train_subset, batch_size=BATCH_SIZE,
-                                  num_workers=0, shuffle=True)
-        val_loader   = DataLoader(val_subset,   batch_size=BATCH_SIZE,
-                                  num_workers=0, shuffle=False,
-                                  collate_fn=collate_drop_center)
-        model = STModel(n_genes=N_GENES, learning_rate=LR)
+        if mode == "histogene":
+            model = HisToGene(n_layers=8, n_genes=n_genes, learning_rate=lr)
+        elif mode == "stnet":
+            model = STModel(n_genes=n_genes, learning_rate=lr)
+        elif mode == "uni":
+            if UNI is None:
+                print("[SKIP] models.UNI không import được.")
+                return None
+            model = UNI(n_genes=n_genes, learning_rate=lr, max_epochs=max_ep)
+            model.enable_lora_training()
+        elif mode == "wsuni":
+            if WSUNI is None:
+                print("[SKIP] models.WSUNI không import được.")
+                return None
+            model = WSUNI(n_genes=n_genes, learning_rate=lr, max_epochs=max_ep)
 
-    elif MODE == "uni":
-        # UNI validation_step: cần xác nhận format — dùng collate_drop_center an toàn
-        train_loader = DataLoader(train_subset, batch_size=BATCH_SIZE,
-                                  num_workers=0, shuffle=True)
-        val_loader   = DataLoader(val_subset,   batch_size=BATCH_SIZE,
-                                  num_workers=0, shuffle=False,
-                                  collate_fn=collate_drop_center)
-        model = UNI(n_genes=N_GENES, learning_rate=LR, max_epochs=MAX_EPOCHS)
-        model.enable_lora_training()
+        trainer = pl.Trainer(
+            accelerator=accelerator,
+            devices=devices,
+            strategy=strategy,
+            max_epochs=max_ep,
+            logger=logger,
+            log_every_n_steps=10,
+            gradient_clip_val=1.0,
+            enable_progress_bar=False,
+            enable_model_summary=False,
+            callbacks=[checkpoint_cb, early_stop_cb, EpochProgressBar()],
+        )
+        trainer.fit(model, train_loader, val_loader)
+        ckpt_path = checkpoint_cb.best_model_path
+        print(f"  Best checkpoint: {ckpt_path}")
+        print(f"  Best val loss  : {checkpoint_callback.best_model_score:.4f}"
+              if hasattr(checkpoint_cb, "best_model_score") else "")
 
-    elif MODE == "wsuni":
-        train_loader = DataLoader(train_subset, batch_size=BATCH_SIZE,
-                                  num_workers=0, shuffle=True)
-        val_loader   = DataLoader(val_subset,   batch_size=BATCH_SIZE,
-                                  num_workers=0, shuffle=False,
-                                  collate_fn=collate_drop_center)
-        model = WSUNI(n_genes=N_GENES, learning_rate=LR, max_epochs=MAX_EPOCHS)
+    else:
+        if ckpt_path is None:
+            raise ValueError(f"--skip_train yêu cầu --ckpt_path cho mode={mode}")
 
-    trainer = pl.Trainer(**trainer_kwargs)
-    trainer.fit(model, train_loader, val_loader)
-    ckpt_path = checkpoint_cb.best_model_path
-    print(f"\nBest checkpoint: {ckpt_path}")
+    # ── PREDICT ───────────────────────────────────────────────────────────────
+    print(f"\n  [PREDICT] Load: {ckpt_path}")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-else:
-    print("\n[skip_train=True] Bỏ qua bước train.")
-    if ckpt_path is None:
-        raise ValueError("Khi --skip_train, phải cung cấp --ckpt_path.")
+    test_dataset = HER2ST(train=False, fold=fold)
+    label        = test_dataset.label[test_dataset.names[0]]
 
-    # Khởi tạo lại model để load checkpoint
-    if MODE == "histogene":
-        model = HisToGene(n_layers=8, n_genes=N_GENES, learning_rate=LR)
-    elif MODE == "stnet":
-        model = STModel(n_genes=N_GENES, learning_rate=LR)
-    elif MODE == "uni":
-        model = UNI(n_genes=N_GENES, learning_rate=LR, max_epochs=MAX_EPOCHS)
-    elif MODE == "wsuni":
-        model = WSUNI(n_genes=N_GENES, learning_rate=LR, max_epochs=MAX_EPOCHS)
+    if mode == "histogene":
+        m = HisToGene.load_from_checkpoint(
+            ckpt_path, n_layers=8, n_genes=n_genes, learning_rate=lr)
+        test_loader = DataLoader(test_dataset, batch_size=1,
+                                 num_workers=0, shuffle=False)
+        adata_pred, adata_gt = histogene_predict(m, test_loader, device=device)
+
+    elif mode == "stnet":
+        m = STModel.load_from_checkpoint(
+            ckpt_path, n_genes=n_genes, learning_rate=lr)
+        test_loader = DataLoader(test_dataset, batch_size=bs,
+                                 num_workers=0, shuffle=False)
+        adata_pred, adata_gt = stnet_predict(m, test_loader, device=device)
+
+    elif mode == "uni":
+        m = UNI.load_from_checkpoint(
+            ckpt_path, n_genes=n_genes, learning_rate=lr, max_epochs=max_ep)
+        test_loader = DataLoader(test_dataset, batch_size=bs,
+                                 num_workers=0, shuffle=False)
+        adata_pred, adata_gt = stnet_predict(m, test_loader, device=device)
+
+    elif mode == "wsuni":
+        m = WSUNI.load_from_checkpoint(
+            ckpt_path, n_genes=n_genes, learning_rate=lr, max_epochs=max_ep)
+        test_loader = DataLoader(test_dataset, batch_size=bs,
+                                 num_workers=0, shuffle=False)
+        adata_pred, adata_gt = stnet_predict(m, test_loader, device=device)
+
+    # ── Post-processing ───────────────────────────────────────────────────────
+    g = list(np.load("data/her_hvg_cut_1000.npy", allow_pickle=True))
+    adata_pred.var_names = g
+    sc.pp.scale(adata_pred)
+    adata_pred = comp_tsne_km(adata_pred, 4)
+
+    # ── METRICS ───────────────────────────────────────────────────────────────
+    print(f"\n  [EVAL] {mode.upper()} fold={fold}")
+    R,        p_values         = get_R(adata_pred, adata_gt)
+    Spearman, spearman_pvalues = get_Spearman(adata_pred, adata_gt)
+    MSE                        = get_MSE(adata_pred, adata_gt)
+    MAE                        = get_MAE(adata_pred, adata_gt)
+    RMSE                       = np.sqrt(MSE)
+    morans                     = get_MoransI_all(adata_pred, adata_gt, top_k=50)
+
+    mean_pcc      = np.nanmean(R)
+    median_pcc    = np.nanmedian(R)
+    mean_spearman = np.nanmean(Spearman)
+    mean_rmse     = np.nanmean(RMSE)
+    mean_mae      = np.nanmean(MAE)
+    mean_mi_pred  = np.nanmean(morans["pred"])
+    mean_mi_gt    = np.nanmean(morans["gt"])
+
+    if label is not None:
+        _, ARI, NMI = cluster_with_nmi(adata_pred, label)
+    else:
+        ARI = NMI = float("nan")
+
+    print(f"  PCC={mean_pcc:.4f}  Spearman={mean_spearman:.4f}  "
+          f"ARI={ARI:.4f}  NMI={NMI:.4f}")
+    print(f"  RMSE={mean_rmse:.4f}  MAE={mean_mae:.4f}")
+    print(f"  Moran's I pred={mean_mi_pred:.4f}  gt={mean_mi_gt:.4f}")
+
+    # ── VISUALIZE ─────────────────────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.hist(R, bins=30, color="tab:blue", alpha=0.75, edgecolor="black")
+    ax.axvline(mean_pcc,   color="red",  ls="--", lw=2,
+               label=f"Mean={mean_pcc:.3f}")
+    ax.axvline(median_pcc, color="blue", ls="-.", lw=2,
+               label=f"Median={median_pcc:.3f}")
+    ax.set_xlabel("PCC"); ax.set_ylabel("Gene count")
+    ax.set_title(f"{mode.upper()} fold{fold} PCC distribution")
+    ax.legend(); ax.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(f"figures/{mode.upper()}_PCC_fold{fold}.png",
+                dpi=300, bbox_inches="tight")
+    plt.close()
+
+    sc.pl.spatial(adata_pred, img=None, color="kmeans", spot_size=112,
+                  frameon=False, legend_loc=None, title=None, show=False)
+    plt.gca().set_title("")
+    plt.savefig(f"figures/kmeans/{mode.upper()}_kmeans_fold{fold}.png",
+                dpi=300, bbox_inches="tight", transparent=True)
+    plt.clf(); plt.close()
+
+    sc.pl.spatial(adata_pred, img=None, color="FASN", spot_size=112,
+                  color_map="magma", frameon=False, legend_loc=None,
+                  title=None, show=False)
+    plt.gca().set_title("")
+    plt.savefig(f"figures/FASN/{mode.upper()}_FASN_fold{fold}.png",
+                dpi=300, bbox_inches="tight", transparent=True)
+    plt.clf(); plt.close()
+
+    # ── LƯU KẾT QUẢ ──────────────────────────────────────────────────────────
+    gene_stats = pd.DataFrame({
+        "gene":          g,
+        "pcc":           R,
+        "pcc_pvalue":    p_values,
+        "spearman":      Spearman,
+        "spearman_pval": spearman_pvalues,
+        "mse":           MSE,
+        "rmse":          RMSE,
+        "mae":           MAE,
+    })
+    gene_stats.to_csv(f"{mode}_gene_stats_fold{fold}.csv", index=False)
+
+    total_params = sum(p.numel() for p in m.parameters())
+    result = {
+        "model":         mode.upper(),
+        "fold":          fold,
+        "pearson":       mean_pcc,
+        "spearman":      mean_spearman,
+        "ari":           ARI,
+        "nmi":           NMI,
+        "rmse":          mean_rmse,
+        "mae":           mean_mae,
+        "morans_i_pred": mean_mi_pred,
+        "morans_i_gt":   mean_mi_gt,
+        "params":        total_params,
+        "ckpt":          ckpt_path,
+    }
+
+    summary_csv = "baselines_results.csv"
+    new_row = pd.DataFrame([result])
+    if os.path.isfile(summary_csv):
+        existing = pd.read_csv(summary_csv)
+        existing = existing[~((existing["model"] == mode.upper()) &
+                               (existing["fold"]  == fold))]
+        summary = pd.concat([existing, new_row], ignore_index=True)
+    else:
+        summary = new_row
+    summary.to_csv(summary_csv, index=False)
+    print(f"  Saved summary → {summary_csv}")
+
+    return result
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PHẦN 2: PREDICT
+# ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
-print(f"\n{'='*60}")
-print("BƯỚC 2: PREDICT")
-print(f"{'='*60}")
-print(f"Load checkpoint: {ckpt_path}")
+ALL_MODES = ["histogene", "stnet", "uni"]   # wsuni bị loại vì không tương thích HER2ST raw image
+modes_to_run = ALL_MODES if args.mode == "all" else [args.mode]
 
-# Tất cả dùng HER2ST test set
-test_dataset = HER2ST(train=False, fold=FOLD)
-label        = test_dataset.label[test_dataset.names[0]]
+all_results = []
+for mode in modes_to_run:
+    max_ep = args.max_epochs
+    bs     = args.batch_size
+    # Khi chạy all, ckpt_path và skip_train không áp dụng
+    ckpt_p     = args.ckpt_path  if args.mode != "all" else None
+    skip_train = args.skip_train if args.mode != "all" else False
 
-if MODE == "histogene":
-    model = HisToGene.load_from_checkpoint(
-        ckpt_path, n_layers=8, n_genes=N_GENES, learning_rate=LR,
+    result = run_one(
+        mode       = mode,
+        fold       = FOLD,
+        n_genes    = N_GENES,
+        lr         = LR,
+        max_epochs = max_ep,
+        batch_size = bs,
+        ckpt_dir   = args.ckpt_dir,
+        ckpt_path  = ckpt_p,
+        skip_train = skip_train,
+        n_gpus     = N_GPUS,
     )
-    test_loader  = DataLoader(test_dataset, batch_size=1, num_workers=0,
-                               shuffle=False)
-    adata_pred, adata_gt = histogene_predict(model, test_loader, device=device)
+    if result is not None:
+        all_results.append(result)
 
-elif MODE == "stnet":
-    model = STModel.load_from_checkpoint(
-        ckpt_path, n_genes=N_GENES, learning_rate=LR,
-    )
-    test_loader  = DataLoader(test_dataset, batch_size=BATCH_SIZE,
-                               num_workers=0, shuffle=False)
-    adata_pred, adata_gt = stnet_predict(model, test_loader, device=device)
-
-elif MODE == "uni":
-    model = UNI.load_from_checkpoint(
-        ckpt_path, n_genes=N_GENES, learning_rate=LR, max_epochs=MAX_EPOCHS,
-    )
-    test_loader  = DataLoader(test_dataset, batch_size=BATCH_SIZE,
-                               num_workers=0, shuffle=False)
-    adata_pred, adata_gt = stnet_predict(model, test_loader, device=device)
-
-elif MODE == "wsuni":
-    model = WSUNI.load_from_checkpoint(
-        ckpt_path, n_genes=N_GENES, learning_rate=LR, max_epochs=MAX_EPOCHS,
-    )
-    test_loader  = DataLoader(test_dataset, batch_size=BATCH_SIZE,
-                               num_workers=0, shuffle=False)
-    adata_pred, adata_gt = stnet_predict(model, test_loader, device=device)
-
-# ── Post-processing (đồng nhất với run_pipeline.py) ──────────────────────────
-g = list(np.load("data/her_hvg_cut_1000.npy", allow_pickle=True))
-adata_pred.var_names = g
-sc.pp.scale(adata_pred)            # scale TRƯỚC cluster
-adata_pred = comp_tsne_km(adata_pred, 4)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PHẦN 3: ĐÁNH GIÁ
-# ─────────────────────────────────────────────────────────────────────────────
-print(f"\n{'='*60}")
-print("BƯỚC 3: ĐÁNH GIÁ")
-print(f"{'='*60}")
-
-R,        p_values         = get_R(adata_pred, adata_gt)
-Spearman, spearman_pvalues = get_Spearman(adata_pred, adata_gt)
-MSE                        = get_MSE(adata_pred, adata_gt)
-MAE                        = get_MAE(adata_pred, adata_gt)
-RMSE                       = np.sqrt(MSE)
-morans                     = get_MoransI_all(adata_pred, adata_gt, top_k=50)
-
-mean_pcc      = np.nanmean(R)
-median_pcc    = np.nanmedian(R)
-std_pcc       = np.nanstd(R)
-mean_spearman = np.nanmean(Spearman)
-mean_rmse     = np.nanmean(RMSE)
-mean_mae      = np.nanmean(MAE)
-mean_mi_pred  = np.nanmean(morans["pred"])
-mean_mi_gt    = np.nanmean(morans["gt"])
-n_spots       = adata_pred.shape[0]
-
-print(f"  Model                      : {MODE.upper()}")
-print(f"  Fold                       : {FOLD}")
-print(f"  Số spot test               : {n_spots}")
-print(f"  Số gene                    : {len(R)}")
-print()
-print(f"  [Correlation]")
-print(f"  Mean Gene-wise PCC         : {mean_pcc:.4f}")
-print(f"  Median Gene-wise PCC       : {median_pcc:.4f}")
-print(f"  Std Gene-wise PCC          : {std_pcc:.4f}")
-print(f"  Mean Gene-wise Spearman    : {mean_spearman:.4f}")
-print()
-print(f"  [Error]")
-print(f"  Mean RMSE                  : {mean_rmse:.4f}")
-print(f"  Mean MAE                   : {mean_mae:.4f}")
-print()
-print(f"  [Spatial structure - top-50 high-var genes]")
-print(f"  Mean Moran's I (pred)      : {mean_mi_pred:.4f}")
-print(f"  Mean Moran's I (gt)        : {mean_mi_gt:.4f}")
-
-if label is not None:
-    clus, ARI, NMI = cluster_with_nmi(adata_pred, label)
-    print()
-    print(f"  [Global structure]")
-    print(f"  ARI (Adjusted Rand Index)  : {ARI:.4f}")
-    print(f"  NMI (Norm. Mutual Info)    : {NMI:.4f}")
-else:
-    ARI = float("nan")
-    NMI = float("nan")
-    print("\nARI/NMI: N/A (section không có ground-truth label)")
-print("=" * 60)
-
-gene_stats = pd.DataFrame({
-    "gene":          g,
-    "pcc":           R,
-    "pcc_pvalue":    p_values,
-    "spearman":      Spearman,
-    "spearman_pval": spearman_pvalues,
-    "mse":           MSE,
-    "rmse":          RMSE,
-    "mae":           MAE,
-})
-
-print(f"\nTop-10 gen TỐT NHẤT:")
-print("  " + gene_stats.nlargest(10, "pcc")[["gene", "pcc", "spearman"]]
-      .to_string(index=False).replace("\n", "\n  "))
-print(f"\nTop-10 gen KÉM NHẤT:")
-print("  " + gene_stats.nsmallest(10, "pcc")[["gene", "pcc", "spearman"]]
-      .to_string(index=False).replace("\n", "\n  "))
-print(f"\n  PCC>0  : {np.sum(R>0):,}/{len(R)} ({100*np.sum(R>0)/len(R):.1f}%)")
-print(f"  PCC>0.2: {np.sum(R>0.2):,}/{len(R)} ({100*np.sum(R>0.2)/len(R):.1f}%)")
-print(f"  PCC>0.3: {np.sum(R>0.3):,}/{len(R)} ({100*np.sum(R>0.3)/len(R):.1f}%)")
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PHẦN 4: VISUALIZE
-# ─────────────────────────────────────────────────────────────────────────────
-fig, ax = plt.subplots(figsize=(9, 5))
-ax.hist(R, bins=30, color="tab:blue", alpha=0.75, edgecolor="black")
-ax.axvline(mean_pcc,   color="red",  linestyle="--", lw=2,
-           label=f"Mean PCC = {mean_pcc:.3f}")
-ax.axvline(median_pcc, color="blue", linestyle="-.", lw=2,
-           label=f"Median PCC = {median_pcc:.3f}")
-ax.set_xlabel("PCC"); ax.set_ylabel("Số gene")
-ax.set_title(f"PCC distribution - {MODE.upper()} fold{FOLD}")
-ax.legend(); ax.grid(alpha=0.3)
-plt.tight_layout()
-pcc_fig = f"figures/{MODE.upper()}_PCC_distribution_fold{FOLD}.png"
-plt.savefig(pcc_fig, dpi=300, bbox_inches="tight")
-plt.show()
-print(f"\nĐã lưu → {pcc_fig}")
-
-sc.pl.spatial(adata_pred, img=None, color="kmeans", spot_size=112,
-              frameon=False, legend_loc=None, title=None, show=False)
-plt.gca().set_title("")
-kmeans_fig = f"figures/kmeans/{MODE.upper()}_kmeans_fold{FOLD}.png"
-plt.savefig(kmeans_fig, dpi=300, bbox_inches="tight", transparent=True)
-plt.clf(); plt.close()
-print(f"Saved: {kmeans_fig}")
-
-sc.pl.spatial(adata_pred, img=None, color="FASN", spot_size=112,
-              color_map="magma", frameon=False, legend_loc=None,
-              title=None, show=False)
-plt.gca().set_title("")
-fasn_fig = f"figures/FASN/{MODE.upper()}_FASN_fold{FOLD}.png"
-plt.savefig(fasn_fig, dpi=300, bbox_inches="tight", transparent=True)
-plt.clf(); plt.close()
-print(f"Saved: {fasn_fig}")
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PHẦN 5: LƯU KẾT QUẢ
-# ─────────────────────────────────────────────────────────────────────────────
-gene_csv = f"{MODE}_gene_stats_fold{FOLD}.csv"
-gene_stats.to_csv(gene_csv, index=False)
-print(f"\nĐã lưu per-gene stats → {gene_csv}")
-
-summary_csv  = "baselines_results.csv"
-total_params = sum(p.numel() for p in model.parameters())
-new_row = pd.DataFrame([{
-    "model":         MODE.upper(),
-    "fold":          FOLD,
-    "pearson":       mean_pcc,
-    "spearman":      mean_spearman,
-    "ari":           ARI,
-    "nmi":           NMI,
-    "rmse":          mean_rmse,
-    "mae":           mean_mae,
-    "morans_i_pred": mean_mi_pred,
-    "morans_i_gt":   mean_mi_gt,
-    "params":        total_params,
-    "ckpt":          ckpt_path,
-}])
-
-if os.path.isfile(summary_csv):
-    existing = pd.read_csv(summary_csv)
-    existing = existing[~((existing["model"] == MODE.upper()) &
-                           (existing["fold"]  == FOLD))]
-    summary = pd.concat([existing, new_row], ignore_index=True)
-else:
-    summary = new_row
-
-summary.to_csv(summary_csv, index=False)
-print(f"Đã lưu/cập nhật summary → {summary_csv}")
-
-print(f"\n{'='*60}")
-print(f"HOÀN TẤT: {MODE.upper()} fold={FOLD}")
-print(f"  PCC={mean_pcc:.4f}  Spearman={mean_spearman:.4f}  "
-      f"ARI={ARI:.4f}  NMI={NMI:.4f}")
-print(f"  RMSE={mean_rmse:.4f}  MAE={mean_mae:.4f}")
-print(f"  Moran's I pred={mean_mi_pred:.4f}  gt={mean_mi_gt:.4f}")
-print(f"{'='*60}")
+# ── Bảng tổng kết cuối ───────────────────────────────────────────────────────
+if all_results:
+    df = pd.DataFrame(all_results)
+    print(f"\n{'='*70}")
+    print("TỔNG KẾT TẤT CẢ BASELINE")
+    print(f"{'='*70}")
+    cols = ["model", "pearson", "spearman", "ari", "nmi", "rmse", "mae",
+            "morans_i_pred", "params"]
+    cols = [c for c in cols if c in df.columns]
+    print(df[cols].sort_values("pearson", ascending=False).to_string(index=False))
+    print(f"{'='*70}")
