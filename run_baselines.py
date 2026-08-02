@@ -190,7 +190,7 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
     # Đơn giản, không cần spawn, không conflict với num_workers=0.
     # DDP sẽ nhanh hơn nhưng cần multi-process → phức tạp hơn khi chạy từ script.
     if n_gpus > 1:
-        strategy = "dp"
+        strategy = "ddp"
         accelerator = "gpu"
         devices = n_gpus
     elif torch.cuda.is_available():
