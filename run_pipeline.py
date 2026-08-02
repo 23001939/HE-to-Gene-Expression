@@ -358,13 +358,19 @@ VAL_SECTION = sorted(train_dataset.names)[0]
 print(f"Slide dùng làm validation (tách từ tập train, KHÔNG phải test_dataset): {VAL_SECTION}")
 
 DDP_RANK = int(os.environ.get("LOCAL_RANK", 0))
-DDP_WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
+# Kaggle's parent DDP process can construct the rank-0 loader before it
+# exports WORLD_SIZE.  Fall back to the configured device count so rank 0 also
+# receives only its own section shard rather than processing the full dataset.
+DDP_WORLD_SIZE = int(os.environ.get("WORLD_SIZE", N_GPUS))
 train_sampler = SectionBatchSampler(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
                                      exclude_sections=[VAL_SECTION], rank=DDP_RANK,
                                      num_replicas=DDP_WORLD_SIZE, shard_sections=True)
 val_sampler = SectionBatchSampler(train_dataset, batch_size=BATCH_SIZE, shuffle=False,
                                    include_sections=[VAL_SECTION], rank=DDP_RANK,
                                    num_replicas=DDP_WORLD_SIZE, shard_sections=False)
+print(f"DDP data shard: rank {DDP_RANK}/{DDP_WORLD_SIZE}; "
+      f"train sections={len(train_sampler.section_names)}, "
+      f"train batches={len(train_sampler)}")
 train_loader = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=0,
                            collate_fn=section_collate_fn)
 val_loader = DataLoader(train_dataset, batch_sampler=val_sampler, num_workers=0,

@@ -103,6 +103,13 @@ from predict import stnet_predict, histogene_predict
 # ── Callback: log mỗi epoch ra stdout ────────────────────────────────────────
 class EpochProgressBar(Callback):
     """In MSE/PCC train-validation và learning rate sau mỗi epoch."""
+    def on_train_start(self, trainer, pl_module):
+        # Lightning shards the ordinary DataLoaders with DistributedSampler.
+        # Print the effective per-rank work so DDP duplication is immediately
+        # visible in Kaggle logs.
+        print(f"DDP data shard: rank {trainer.global_rank}/{trainer.world_size}; "
+              f"train batches={trainer.num_training_batches}", flush=True)
+
     def on_train_epoch_start(self, trainer, pl_module):
         self.epoch_started_at = time.perf_counter()
 
@@ -304,6 +311,9 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
             accelerator=accelerator,
             devices=devices,
             strategy=strategy,
+            # Explicitly keep Lightning's correct DistributedSampler wrapping
+            # for the ordinary baseline DataLoaders under DDP.
+            use_distributed_sampler=True,
             max_epochs=max_ep,
             logger=logger,
             log_every_n_steps=10,
