@@ -24,6 +24,7 @@ import argparse
 import os
 import pathlib
 import random
+import time
 import warnings
 
 import numpy as np
@@ -102,8 +103,11 @@ from predict import stnet_predict, histogene_predict
 # ── Callback: log mỗi epoch ra stdout ────────────────────────────────────────
 class EpochProgressBar(Callback):
     """In MSE/PCC train-validation và learning rate sau mỗi epoch."""
-    def on_train_epoch_end(self, trainer, pl_module):
-        if not trainer.is_global_zero:
+    def on_train_epoch_start(self, trainer, pl_module):
+        self.epoch_started_at = time.perf_counter()
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if trainer.sanity_checking or not trainer.is_global_zero:
             return
         m        = trainer.callback_metrics
         ep       = trainer.current_epoch + 1
@@ -116,14 +120,14 @@ class EpochProgressBar(Callback):
         if isinstance(opt, list):
             opt = opt[0]
         lr = opt.param_groups[0]["lr"]
-        # Thời gian epoch
-        elapsed = trainer.fit_loop.epoch_loop.batch_progress.total.completed
+        elapsed = time.perf_counter() - getattr(self, "epoch_started_at", time.perf_counter())
+        remaining = max(total - ep, 0) * elapsed
         print(
             f"[{trainer.logger.name}] "
             f"Epoch {ep:3d}/{total}  "
             f"train_mse={float(t_mse):.4f}  train_pcc={float(t_pcc):.4f}  "
             f"val_mse={float(v_mse):.4f}  val_pcc={float(v_pcc):.4f}  "
-            f"lr={lr:.2e}",
+            f"lr={lr:.2e}  epoch_time={elapsed:.1f}s  eta={remaining / 60:.1f}m",
             flush=True,
         )
 
@@ -305,7 +309,7 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
             log_every_n_steps=10,
             gradient_clip_val=1.0,
             precision="16-mixed" if accelerator == "gpu" else "32-true",
-            enable_progress_bar=False,
+            enable_progress_bar=True,
             enable_model_summary=False,
             callbacks=[checkpoint_cb, early_stop_cb, EpochProgressBar()],
         )

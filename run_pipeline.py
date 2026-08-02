@@ -23,6 +23,7 @@ import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import random
+import time
 import numpy as np
 import torch
 import warnings
@@ -276,6 +277,9 @@ class SectionBatchSampler(Sampler):
 from pytorch_lightning.callbacks import Callback
 
 class SimpleProgressBar(Callback):
+    def on_train_epoch_start(self, trainer, pl_module):
+        self.epoch_started_at = time.perf_counter()
+
     def on_validation_epoch_end(self, trainer, pl_module):
         # Validation runs after training in each epoch, so this reports the
         # current epoch's MSE/PCC rather than stale validation metrics.
@@ -295,11 +299,14 @@ class SimpleProgressBar(Callback):
         if isinstance(opt, list):
             opt = opt[0]
         lr = opt.param_groups[0]['lr']
+        elapsed = time.perf_counter() - getattr(self, 'epoch_started_at', time.perf_counter())
+        remaining = max(total_epochs - (current_epoch + 1), 0) * elapsed
         
         # In đúng format bạn muốn
         print(f"[ep {current_epoch + 1}/{total_epochs}] "
               f"train_mse={train_mse:.4f} train_pcc={train_pcc:.4f} "
-              f"val_mse={val_mse:.4f} val_pcc={val_pcc:.4f} lr={lr:.4e}")
+              f"val_mse={val_mse:.4f} val_pcc={val_pcc:.4f} lr={lr:.4e} "
+              f"epoch_time={elapsed:.1f}s eta={remaining / 60:.1f}m")
         
 def section_collate_fn(batch):
     """Thay the default_collate CHI cho truong section_name (str -> giu nguyen 1 chuoi
@@ -413,7 +420,7 @@ trainer = pl.Trainer(
     log_every_n_steps=10,
     gradient_clip_val=1.0,
     precision='16-mixed' if torch.cuda.is_available() else '32-true',
-    enable_progress_bar=False,      # Tắt progress bar
+    enable_progress_bar=True,
     enable_model_summary=False,     # Tắt bảng tóm tắt model
 )
 
