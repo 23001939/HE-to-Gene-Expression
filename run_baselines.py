@@ -17,7 +17,7 @@ Tùy chọn:
     --ckpt_dir    : thư mục lưu checkpoint (default: model_ckpts)
     --ckpt_path   : load checkpoint sẵn, bỏ qua train (chỉ dùng khi mode != all)
     --skip_train  : chỉ predict+eval (chỉ dùng khi mode != all)
-    --n_gpus      : số GPU dùng (default: tối đa 2, giống Light-HGGEP)
+    --n_gpus      : số GPU dùng (default: 1, giống Light-HGGEP)
 """
 
 import argparse
@@ -66,7 +66,7 @@ parser.add_argument("--ckpt_path",  type=str,   default=None,
 parser.add_argument("--skip_train", action="store_true",
                     help="Chỉ dùng khi --mode không phải 'all'")
 parser.add_argument("--n_gpus",     type=int,   default=None,
-                    help="Số GPU dùng. Mặc định: tối đa 2, giống Light-HGGEP.")
+                    help="Số GPU dùng. Mặc định: 1, giống Light-HGGEP.")
 parser.add_argument("--num_workers", type=int, default=2,
                     help="DataLoader workers trên mỗi DDP rank (default: 2).")
 args = parser.parse_args()
@@ -81,7 +81,7 @@ n_available = torch.cuda.device_count()
 if args.n_gpus is not None:
     N_GPUS = min(args.n_gpus, n_available)
 else:
-    N_GPUS = min(n_available, 2)
+    N_GPUS = 1
 N_GPUS = max(N_GPUS, 1)           # ít nhất 1
 
 print("=" * 60)

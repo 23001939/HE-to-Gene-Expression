@@ -42,8 +42,8 @@ set_seed(42)
 print("CUDA available:", torch.cuda.is_available())
 if torch.cuda.is_available():
     print("GPU:", torch.cuda.get_device_name(0))
-N_GPUS = min(torch.cuda.device_count(), 2) if torch.cuda.is_available() else 1
-print("GPUs used for fair comparison:", N_GPUS)
+N_GPUS = 1  # LightHGGEP is I/O-bound and faster/more stable on one T4.
+print("GPUs used for Light-HGGEP:", N_GPUS)
 
 # ============================================================================
 # ---- Cell 4 (notebook gốc) ----
@@ -233,12 +233,6 @@ import math
 from torch.utils.data import Sampler
 
 
-def debug_worker_init(worker_id):
-    """One-line, flushed worker startup trace for Kaggle DDP diagnosis."""
-    rank = os.environ.get("LOCAL_RANK", "0")
-    print(f"[debug rank={rank}] DataLoader worker {worker_id} started", flush=True)
-
-
 class SectionBatchSampler(Sampler):
     def __init__(self, dataset, batch_size, shuffle=True,
                  include_sections=None, exclude_sections=None,
@@ -260,30 +254,48 @@ class SectionBatchSampler(Sampler):
             self.section_indices = {k: v for k, v in self.section_indices.items()
                                      if k not in set(exclude_sections)}
         
-        # Lưu danh sách section names để shuffle
-        self.section_names = list(self.section_indices.keys())
         # A rank owns complete sections: spatial graphs are never split across
-        # GPUs. Validation/test remain replicated for synchronized evaluation.
+        # GPUs.  Greedy bin-packing balances *batch counts*, not merely section
+        # counts, because HER2ST sections have very different spot counts.
+        self.section_names = list(self.section_indices.keys())
+        self.steps_per_epoch = sum(math.ceil(len(v) / self.batch_size)
+                                   for v in self.section_indices.values())
         if shard_sections and num_replicas > 1:
-            self.section_names = self.section_names[rank::num_replicas]
+            bins = [([], 0) for _ in range(num_replicas)]
+            names_by_size = sorted(
+                self.section_names,
+                key=lambda name: math.ceil(len(self.section_indices[name]) / self.batch_size),
+                reverse=True,
+            )
+            for name in names_by_size:
+                target = min(range(num_replicas), key=lambda i: bins[i][1])
+                batch_count = math.ceil(len(self.section_indices[name]) / self.batch_size)
+                bins[target][0].append(name)
+                bins[target] = (bins[target][0], bins[target][1] + batch_count)
+            # DDP needs an identical number of optimizer steps on every rank.
+            # The very small excess is dropped after shuffling, so it rotates
+            # between sections across epochs instead of permanently omitting one.
+            self.section_names = bins[rank][0]
+            self.steps_per_epoch = min(total for _, total in bins)
 
     def __iter__(self):
         section_names = self.section_names.copy()
         if self.shuffle:
             random.shuffle(section_names)
+        emitted = 0
         for name in section_names:
             idxs = list(self.section_indices[name])
             if self.shuffle:
                 random.shuffle(idxs)
             # Cắt thành các batch nhỏ theo BATCH_SIZE
             for s in range(0, len(idxs), self.batch_size):
+                if emitted >= self.steps_per_epoch:
+                    return
                 yield idxs[s:s + self.batch_size]
+                emitted += 1
 
     def __len__(self):
-        # ``section_indices`` retains every section for lookup, while
-        # ``section_names`` is the rank-local shard used by __iter__.
-        return sum(math.ceil(len(self.section_indices[name]) / self.batch_size)
-                   for name in self.section_names)
+        return self.steps_per_epoch
 
 from pytorch_lightning.callbacks import Callback
 
@@ -320,32 +332,6 @@ class SimpleProgressBar(Callback):
               f"epoch_time={elapsed:.1f}s eta={remaining / 60:.1f}m")
 
 
-class DebugLifecycle(Callback):
-    """Low-volume DDP traces to identify a blocked training stage."""
-    @staticmethod
-    def _log(trainer, stage):
-        print(f"[debug rank={trainer.global_rank}/{trainer.world_size}] {stage}",
-              flush=True)
-
-    def on_fit_start(self, trainer, pl_module):
-        self._log(trainer, "fit started")
-
-    def on_sanity_check_start(self, trainer, pl_module):
-        self._log(trainer, "sanity validation started")
-
-    def on_sanity_check_end(self, trainer, pl_module):
-        self._log(trainer, "sanity validation finished")
-
-    def on_train_start(self, trainer, pl_module):
-        self._log(trainer, f"train started; batches={trainer.num_training_batches}")
-
-    def on_train_epoch_start(self, trainer, pl_module):
-        self._log(trainer, f"epoch {trainer.current_epoch + 1} started")
-
-    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
-        if batch_idx == 0:
-            self._log(trainer, "first train batch reached")
-        
 def section_collate_fn(batch):
     """Thay the default_collate CHI cho truong section_name (str -> giu nguyen 1 chuoi
     thay vi bi goi thanh list). Moi truong khac (patch_3ch/loc/exp/center/local_idx) duoc
@@ -412,14 +398,12 @@ print(f"DDP data shard: rank {DDP_RANK}/{DDP_WORLD_SIZE}; "
 loader_options = dict(num_workers=NUM_WORKERS,
                       pin_memory=torch.cuda.is_available(),
                       persistent_workers=NUM_WORKERS > 0,
-                      worker_init_fn=debug_worker_init,
                       timeout=180)
 eval_loader_options = dict(num_workers=NUM_WORKERS,
                            pin_memory=torch.cuda.is_available(),
                            # Avoid keeping train and validation worker caches
                            # alive simultaneously on every DDP rank.
                            persistent_workers=False,
-                           worker_init_fn=debug_worker_init,
                            timeout=180)
 train_loader = DataLoader(train_dataset, batch_sampler=train_sampler,
                            collate_fn=section_collate_fn, **loader_options)
@@ -471,8 +455,7 @@ trainer = pl.Trainer(
     # SectionBatchSampler shards whole spatial sections itself.
     use_distributed_sampler=False,
     max_epochs=MAX_EPOCHS,
-    callbacks=[early_stop_callback, checkpoint_callback, SimpleProgressBar(),
-               DebugLifecycle()],
+    callbacks=[early_stop_callback, checkpoint_callback, SimpleProgressBar()],
     logger=default_logger,
     log_every_n_steps=10,
     gradient_clip_val=1.0,
@@ -482,7 +465,6 @@ trainer = pl.Trainer(
 )
 
 # Train
-print(f"[debug rank={DDP_RANK}/{DDP_WORLD_SIZE}] calling trainer.fit", flush=True)
 trainer.fit(model, train_loader, val_loader)
 
 # Only rank zero performs the single canonical test evaluation and writes files.
