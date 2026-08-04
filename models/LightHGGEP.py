@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as cp
 import pytorch_lightning as pl
 from training_metrics import mean_gene_pearson
 
@@ -119,31 +120,48 @@ class LightHGGEP(pl.LightningModule):
         
         return gradient
     
+    def _cnn_chunk_forward(self, xb):
+        """[MỚI] Tách riêng phần CNN của 1 chunk thành hàm riêng để dùng với
+        torch.utils.checkpoint (xem forward() bên dưới) -- không đổi phép tính,
+        chỉ tách hàm để checkpoint() có thể gọi lại (recompute) lúc backward."""
+        f1 = self.stage1(xb)
+        f1_gap = self.gap(f1).view(xb.size(0), -1)
+        f2 = self.stage2(f1)
+        f2_gap = self.gap(f2).view(xb.size(0), -1)
+        f3 = self.stage3(f2)
+        f3_gap = self.gap(f3).view(xb.size(0), -1)
+        z_b = torch.cat([f1_gap, f2_gap, f3_gap], dim=1)
+        return self.cross_scale_fusion(z_b)
+
     def forward(self, x, positions=None, section_name=None, local_indices=None):
         """
-        [SỬA lỗi #1]: CNN (stage1-3 + fusion) chạy theo CHUNK nhỏ (self.cnn_chunk, mặc định
-        64 patch/lần) -- feature map 224x224x64 kênh trước maxpool tốn ~12.8MB/patch, 1
-        section ~2000 patch chạy 1 lần sẽ tốn ~25.7GB, không khả thi trên T4 16GB dù model
-        ít tham số. Việc chunk KHÔNG đổi giá trị toán học (mỗi patch CNN độc lập với patch
-        khác -- chỉ BatchNorm là tính thống kê theo từng chunk, nhưng đây CŨNG chính là cách
-        BN đã hoạt động trước đây với batch=32 ngẫu nhiên, nên không phải hồi quy so với hiện
-        tại). Spatial SGC (Eq.2) vẫn áp dụng trên ĐỦ N embedding sau khi ghép các chunk lại
+        [SỬA lỗi #1, sửa lại]: CNN (stage1-3 + fusion) chạy theo CHUNK nhỏ (self.cnn_chunk).
+        LƯU Ý QUAN TRỌNG: chunk hoá đơn thuần (bản trước) KHÔNG giảm bộ nhớ đỉnh lúc
+        backward -- autograd vẫn giữ lại đồ thị tính đạo hàm (bao gồm feature map
+        224x224x64 kênh trước maxpool, ~12.8MB/patch) của MỌI chunk đã chạy cho đến khi
+        backward() xong, vì z_spot_chunks giữ tham chiếu tới toàn bộ chuỗi tính toán đó.
+        Với section ~2000 patch, cnn_chunk=32 -> ~62 chunk tích luỹ dần -> OOM giữa chừng
+        (đúng như traceback: crash ở stage2, không phải chunk đầu). Fix: bọc
+        _cnn_chunk_forward bằng torch.utils.checkpoint -- CHỈ giữ lại input/output của
+        mỗi chunk, activation trung gian được TÍNH LẠI (không lưu) lúc backward, đổi lấy
+        ~30-50% compute thêm để giảm mạnh bộ nhớ đỉnh. CHỈ áp dụng lúc train (cần
+        backward); lúc eval/predict (torch.no_grad()) không cần checkpoint, chạy thẳng
+        để không tốn compute recompute vô ích.
+        Spatial SGC (Eq.2) vẫn áp dụng trên ĐỦ N embedding sau khi ghép các chunk lại
         -- nhờ vậy A_norm_full không còn bị cắt mất láng giềng thật như thiết kế batching cũ.
         """
         B = x.size(0)
         chunk = getattr(self, "cnn_chunk", 64)
-    
+
         z_spot_chunks = []
         for start in range(0, B, chunk):
             xb = x[start:start + chunk]
-            f1 = self.stage1(xb)
-            f1_gap = self.gap(f1).view(xb.size(0), -1)
-            f2 = self.stage2(f1)
-            f2_gap = self.gap(f2).view(xb.size(0), -1)
-            f3 = self.stage3(f2)
-            f3_gap = self.gap(f3).view(xb.size(0), -1)
-            z_b = torch.cat([f1_gap, f2_gap, f3_gap], dim=1)
-            z_spot_chunks.append(self.cross_scale_fusion(z_b))
+            if self.training:
+                # use_reentrant=False: API mới hơn, ổn định hơn với BatchNorm/nhiều input
+                z_b = cp.checkpoint(self._cnn_chunk_forward, xb, use_reentrant=False)
+            else:
+                z_b = self._cnn_chunk_forward(xb)
+            z_spot_chunks.append(z_b)
         z_spot = torch.cat(z_spot_chunks, dim=0)   # (N, 128) -- ĐỦ cả section, không bị cắt
     
         # Spatial SGC (Eq. 2) -- logic KHÔNG đổi, chỉ khác input z_spot giờ đủ N
