@@ -274,6 +274,20 @@ def stnet_predict(model, test_loader, device=torch.device('cpu')):
 def histogene_predict(model, test_loader, device=torch.device('cpu')):
     """
     Predict function cho HisToGene dùng HER2ST dataset.
+
+    HisToGene.forward(patches, centers) kỳ vọng input slide-level:
+      patches : (1, N_spots, patch_dim)   -- flatten từng patch
+      centers : (1, N_spots, 2)           -- tọa độ grid đã discretize
+
+    HER2ST test trả về patch-level: (patch, loc, exp, center)
+      patch  : (B, 3, H, W)
+      loc    : (B, 2)   -- tọa độ grid float
+      exp    : (B, n_genes)
+      center : (B, 2)   -- tọa độ pixel
+
+    Chiến lược: gom toàn bộ spots của test section vào 1 batch slide,
+    flatten patch và discretize loc sang index để dùng Embedding.
+    Vì test chỉ có 1 section (LOOCV), load hết rồi forward 1 lần.
     """
     model.eval()
     model = model.to(device)
@@ -292,27 +306,27 @@ def histogene_predict(model, test_loader, device=torch.device('cpu')):
     exps    = torch.cat(all_exps,    dim=0)   # (N, n_genes)
     centers = torch.cat(all_centers, dim=0)   # (N, 2)
 
-    # Crop to 112x112 (HisToGene expectation)
+    # The model was trained with centred 112 px crops (patch_dim=3*112*112).
+    # Keep inference identical even though HER2ST stores 224 px patches.
     if patches.shape[-2:] != (112, 112):
         h, w = patches.shape[-2:]
         top, left = (h - 112) // 2, (w - 112) // 2
         patches = patches[:, :, top:top + 112, left:left + 112]
 
-    # Flatten patch
+    # Flatten patch: (N, 3*112*112) → thêm batch dim → (1, N, patch_dim)
     N = patches.shape[0]
+    # Centre-cropping can create a non-contiguous tensor; reshape preserves
+    # values while safely flattening it for the patch embedding.
     patch_flat = patches.reshape(N, -1).unsqueeze(0).to(device)  # (1, N, patch_dim)
 
-    # Discretize coordinates
+    # Discretize tọa độ grid sang long index cho Embedding
+    # HisToGene dùng n_pos=64 → clamp về [0, 63]
     locs_long = locs.long().clamp(0, 63).unsqueeze(0).to(device)  # (1, N, 2)
 
     with torch.no_grad():
         pred = model(patch_flat, locs_long)   # (1, N, n_genes)
-    
-    # === FIX: Convert to log1p ===
     pred = pred.squeeze(0).cpu().numpy()      # (N, n_genes)
-    pred = np.log1p(pred)                     # THÊM DÒNG NÀY
-    
-    # Ground truth is already log1p from dataset
+
     centers_np = centers.numpy()
     exps_np    = exps.numpy()
 
