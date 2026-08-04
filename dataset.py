@@ -438,11 +438,21 @@ class LightHGGEP_HER2ST_Top250(LightHGGEP_HER2ST):
     -> train/test instance cung dung 1 bo 250 gen, khong lech n_genes.
     """
     def _select_gene_list(self):
-        # Tinh mean bieu hien tung gen tren TAT CA section (chua split) -> 250 gen cao nhat
+        # 1) Lay intersection gene co mat trong TAT CA section
+        common_genes = None
+        for name in self.names:
+            cnt = self.get_cnt(name)
+            genes = set(cnt.columns)
+            if common_genes is None:
+                common_genes = genes
+            else:
+                common_genes &= genes
+
+        # 2) Tinh mean bieu hien tung gen tren intersection -> 250 gen cao nhat
         gene_means = {}
         for name in self.names:
             cnt = self.get_cnt(name)
-            for g in cnt.columns:
+            for g in common_genes:
                 gene_means[g] = gene_means.get(g, 0.0) + float(cnt[g].mean())
         top = sorted(gene_means.items(), key=lambda kv: kv[1], reverse=True)[:250]
         return [g for g, _ in top]
