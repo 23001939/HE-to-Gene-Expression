@@ -192,7 +192,11 @@ MAX_EPOCHS = 100
 PATIENCE = 15
 LEARNING_RATE = 1e-4
 K_NEIGHBORS = 4
-BATCH_SIZE = 32  # Light-HGGEP rat nhe nen co the tang batch size
+BATCH_SIZE = 32  # [SỬA - ý 1] KHÔNG còn là số spot/batch của SectionBatchSampler nữa
+                 # (giờ 1 batch = 1 section trọn vẹn) -- chỉ còn dùng làm cnn_chunk
+                 # (số patch/lần chạy qua CNN bên trong forward(), xem models/LightHGGEP.py)
+                 # để tránh OOM GPU. Có thể tăng/giảm riêng theo bộ nhớ GPU mà không
+                 # ảnh hưởng gì đến cấu trúc đồ thị SGC.
 NUM_WORKERS = 2  # per DDP rank (4 loader workers total with 2 GPUs)
 
 CKPT_DIR = "model_ckpts"
@@ -204,7 +208,8 @@ print(f"  N_GENES = {N_GENES}")
 print(f"  MAX_EPOCHS = {MAX_EPOCHS}")
 print(f"  PATIENCE = {PATIENCE}")
 print(f"  LEARNING_RATE = {LEARNING_RATE}")
-print(f"  BATCH_SIZE = {BATCH_SIZE}")
+print(f"  BATCH_SIZE (= cnn_chunk, KHÔNG phải số spot/batch nữa) = {BATCH_SIZE}")
+print(f"  Batch huấn luyện/đánh giá thực tế = 1 section trọn vẹn (kích thước thay đổi theo section)")
 print(f"  NUM_WORKERS = {NUM_WORKERS} per DDP rank")
 
 # ============================================================================
@@ -234,10 +239,27 @@ from torch.utils.data import Sampler
 
 
 class SectionBatchSampler(Sampler):
-    def __init__(self, dataset, batch_size, shuffle=True,
+    """[SỬA - ý 1 review] Mỗi batch giờ là TRỌN VẸN 1 section (không còn cắt theo
+    batch_size như trước). Lý do: Spatial SGC (Eq.2, forward()) tính
+    A_norm_full[local_indices][:, local_indices] -- công thức này CHỈ đúng ý nghĩa khi
+    local_indices bao phủ đủ (hoặc gần đủ) láng giềng K-NN thật của mỗi spot. Với
+    batch_size=32 trên section ~300-600 spot, phần lớn 4 láng giềng thật của 1 spot nằm
+    NGOÀI batch 32-spot đó -- SGC gần như suy biến về self-loop-only, không lan truyền
+    không gian như thiết kế.
+
+    Việc chống OOM GPU giờ HOÀN TOÀN do forward()'s cnn_chunk đảm nhiệm (đã có sẵn, KHÔNG
+    đổi) -- forward() vẫn chia patch thành từng lô nhỏ (mặc định = BATCH_SIZE) để chạy
+    CNN, rồi mới ghép lại đủ N để chạy SGC trên TOÀN BỘ section. Sampler này giờ không còn
+    liên quan gì đến giới hạn bộ nhớ nữa, chỉ còn đúng 1 nhiệm vụ: đảm bảo 1 batch = 1
+    section trọn vẹn.
+
+    KHÔNG còn tham số batch_size (không cần nữa) -- nếu bạn thấy lỗi gọi hàm thiếu
+    batch_size, đó là do đang gọi theo chữ ký cũ, xem 3 chỗ gọi SectionBatchSampler(...) ở
+    dưới đã được cập nhật.
+    """
+    def __init__(self, dataset, shuffle=True,
                  include_sections=None, exclude_sections=None,
                  rank=0, num_replicas=1, shard_sections=True):
-        self.batch_size = batch_size
         self.shuffle = shuffle
 
         self.section_indices = {}
@@ -253,30 +275,29 @@ class SectionBatchSampler(Sampler):
         if exclude_sections is not None:
             self.section_indices = {k: v for k, v in self.section_indices.items()
                                      if k not in set(exclude_sections)}
-        
+
         # A rank owns complete sections: spatial graphs are never split across
-        # GPUs.  Greedy bin-packing balances *batch counts*, not merely section
-        # counts, because HER2ST sections have very different spot counts.
+        # GPUs. [SỬA] Giờ 1 section LUÔN = 1 batch, nên cân bằng DDP theo SỐ SPOT/rank
+        # (ước lượng chi phí tính toán sát hơn "số batch/section" cũ, vì mỗi section giờ
+        # chỉ còn đúng 1 batch bất kể to nhỏ).
         self.section_names = list(self.section_indices.keys())
-        self.steps_per_epoch = sum(math.ceil(len(v) / self.batch_size)
-                                   for v in self.section_indices.values())
+        self.steps_per_epoch = len(self.section_names)
         if shard_sections and num_replicas > 1:
             bins = [([], 0) for _ in range(num_replicas)]
             names_by_size = sorted(
                 self.section_names,
-                key=lambda name: math.ceil(len(self.section_indices[name]) / self.batch_size),
+                key=lambda name: len(self.section_indices[name]),
                 reverse=True,
             )
             for name in names_by_size:
                 target = min(range(num_replicas), key=lambda i: bins[i][1])
-                batch_count = math.ceil(len(self.section_indices[name]) / self.batch_size)
+                n_spots = len(self.section_indices[name])
                 bins[target][0].append(name)
-                bins[target] = (bins[target][0], bins[target][1] + batch_count)
-            # DDP needs an identical number of optimizer steps on every rank.
-            # The very small excess is dropped after shuffling, so it rotates
-            # between sections across epochs instead of permanently omitting one.
+                bins[target] = (bins[target][0], bins[target][1] + n_spots)
+            # DDP needs an identical number of optimizer steps on every rank --
+            # với 1 section = 1 batch, cần số SECTION bằng nhau trên mỗi rank.
             self.section_names = bins[rank][0]
-            self.steps_per_epoch = min(total for _, total in bins)
+            self.steps_per_epoch = min(len(b[0]) for b in bins)
 
     def __iter__(self):
         section_names = self.section_names.copy()
@@ -284,15 +305,16 @@ class SectionBatchSampler(Sampler):
             random.shuffle(section_names)
         emitted = 0
         for name in section_names:
+            if emitted >= self.steps_per_epoch:
+                return
             idxs = list(self.section_indices[name])
             if self.shuffle:
-                random.shuffle(idxs)
-            # Cắt thành các batch nhỏ theo BATCH_SIZE
-            for s in range(0, len(idxs), self.batch_size):
-                if emitted >= self.steps_per_epoch:
-                    return
-                yield idxs[s:s + self.batch_size]
-                emitted += 1
+                random.shuffle(idxs)   # không ảnh hưởng SGC: local_indices của từng spot
+                                       # tự nó đúng theo __getitem__, không phụ thuộc thứ
+                                       # tự xuất hiện trong list này (hoán vị đối xứng cả
+                                       # hàng lẫn cột của A_norm, không đổi cấu trúc đồ thị)
+            yield idxs   # [SỬA] TOÀN BỘ section, không còn cắt theo batch_size
+            emitted += 1
 
     def __len__(self):
         return self.steps_per_epoch
@@ -386,10 +408,10 @@ DDP_RANK = int(os.environ.get("LOCAL_RANK", 0))
 # exports WORLD_SIZE.  Fall back to the configured device count so rank 0 also
 # receives only its own section shard rather than processing the full dataset.
 DDP_WORLD_SIZE = int(os.environ.get("WORLD_SIZE", N_GPUS))
-train_sampler = SectionBatchSampler(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
+train_sampler = SectionBatchSampler(train_dataset, shuffle=True,
                                      exclude_sections=[VAL_SECTION], rank=DDP_RANK,
                                      num_replicas=DDP_WORLD_SIZE, shard_sections=True)
-val_sampler = SectionBatchSampler(train_dataset, batch_size=BATCH_SIZE, shuffle=False,
+val_sampler = SectionBatchSampler(train_dataset, shuffle=False,
                                    include_sections=[VAL_SECTION], rank=DDP_RANK,
                                    num_replicas=DDP_WORLD_SIZE, shard_sections=False)
 print(f"DDP data shard: rank {DDP_RANK}/{DDP_WORLD_SIZE}; "
@@ -514,7 +536,7 @@ for section, A_norm in test_dataset.A_norm_cache.items():
 # hoàn toàn vô nghĩa về mặt không gian.
 # SectionBatchSampler với shuffle=False đảm bảo mỗi batch CHỈ chứa 1 section và
 # duyệt tuần tự, phù hợp cho inference.
-test_sampler = SectionBatchSampler(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+test_sampler = SectionBatchSampler(test_dataset, shuffle=False)  # [SỬA - ý 1] 1 batch = 1 section trọn vẹn
 test_loader = DataLoader(test_dataset, batch_sampler=test_sampler,
                          collate_fn=section_collate_fn, **eval_loader_options)
 
@@ -676,7 +698,13 @@ results = pd.DataFrame([{
     'learning_rate':  LEARNING_RATE,
     'optimizer':      'AdamW(weight_decay=1e-4)',
     'scheduler':      'CosineAnnealingLR(T_max=max_epochs,eta_min=1e-6)',
-    'batch_size':     BATCH_SIZE,
+    'batch_size':     'full-section (variable spot count)',  # [SỬA - ý 1] KHÔNG còn
+                                                             # là 1 số cố định nữa,
+                                                             # vì 1 batch = 1 section
+                                                             # trọn vẹn (30-600+ spot
+                                                             # tuỳ section)
+    'cnn_chunk':      BATCH_SIZE,  # [MỚI - ý 1] giá trị 32 cũ giờ CHỈ còn ý nghĩa này:
+                                   # số patch/lần chạy qua CNN bên trong forward()
     'seed':           42,
     'n_gpus':         N_GPUS,
     'precision':      '16-mixed' if torch.cuda.is_available() else '32-true',
