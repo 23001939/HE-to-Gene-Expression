@@ -129,26 +129,6 @@ else:
 print("So file .tsv trong ST-cnts:", len([f for f in os.listdir(cnt_dir) if f.endswith(".tsv")]))
 
 # ============================================================================
-# ---- Cell 9 (notebook gốc) ----
-# ============================================================================
-# ----------------------------------------------------------
-# 2.3 Copy file her_hvg_cut_1000.npy tu Kaggle Dataset
-# ----------------------------------------------------------
-import shutil, glob
-
-candidates = glob.glob("/kaggle/input/*/her_hvg_cut_1000.npy") + glob.glob("/kaggle/input/*/**/her_hvg_cut_1000.npy", recursive=True)
-if candidates:
-    shutil.copy(candidates[0], "data/her_hvg_cut_1000.npy")
-    print("Da copy her_hvg_cut_1000.npy tu:", candidates[0])
-elif os.path.isfile("data/her_hvg_cut_1000.npy"):
-    print("data/her_hvg_cut_1000.npy da ton tai.")
-else:
-    raise FileNotFoundError(
-        "KHONG TIM THAY her_hvg_cut_1000.npy trong /kaggle/input/. "
-        "Hay upload file nay len 1 Kaggle Dataset (vi du 'her2st-extra') va Add Input truoc khi chay tiep."
-    )
-
-# ============================================================================
 # ---- Cell 10 (notebook gốc) ----
 # ============================================================================
 # ----------------------------------------------------------
