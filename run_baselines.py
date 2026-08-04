@@ -228,7 +228,10 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
     from models.STNet_model import STModel
 
     max_ep = max_epochs if max_epochs is not None else _default_epochs[mode]
-    bs     = batch_size if batch_size is not None else _default_bs[mode]
+    if mode == "histogene":
+        bs = 1
+    else:
+        bs = batch_size if batch_size is not None else _default_bs[mode]
     loader_options = dict(num_workers=num_workers,
                           pin_memory=torch.cuda.is_available(),
                           persistent_workers=num_workers > 0)
