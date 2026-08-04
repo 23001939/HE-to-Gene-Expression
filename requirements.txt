@@ -4,7 +4,7 @@ torchvision==0.25.0+cu128
 torchaudio==2.10.0+cu128
 aiohappyeyeballs==2.6.1
 aiohttp
-aiosignal==1.3.2
+aiosignal
 anndata==0.10.9
 array_api_compat==1.11.2
 async-timeout==5.0.1
