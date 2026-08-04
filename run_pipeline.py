@@ -186,8 +186,17 @@ for d in ["model_ckpts"]:
 # ============================================================================
 # ---- Cell 19 (notebook gốc) ----
 # ============================================================================
+import argparse
+
 FOLD = 5
-N_GENES = 785
+# Chon dataset qua CLI: 'her2st' (785 gen her_hvg_cut_1000) hoac 'her2st_top250'
+# (250 gen co muc bieu hien trung binh cao nhat, chon tu count matrix truoc LOOCV split).
+_p = argparse.ArgumentParser()
+_p.add_argument('--datasets', choices=['her2st', 'her2st_top250'], default='her2st',
+                help="Dataset dung cho training/eval (mac dinh: her2st)")
+_args = _p.parse_args()
+DATASET = _args.datasets
+N_GENES = None  # tu dong lay tu dataset gene_set neu de None
 MAX_EPOCHS = 100
 PATIENCE = 15
 LEARNING_RATE = 1e-4
@@ -200,6 +209,7 @@ os.makedirs(CKPT_DIR, exist_ok=True)
 
 print(f"Configuration:")
 print(f"  FOLD = {FOLD}")
+print(f"  DATASET = {DATASET}")
 print(f"  N_GENES = {N_GENES}")
 print(f"  MAX_EPOCHS = {MAX_EPOCHS}")
 print(f"  PATIENCE = {PATIENCE}")
@@ -366,14 +376,20 @@ print("Đã định nghĩa SectionBatchSampler / section_collate_fn (vá lỗi b
 # ============================================================================
 # ---- Cell 25 (notebook gốc) ----
 # ============================================================================
-from dataset import LightHGGEP_HER2ST
+from dataset import LightHGGEP_HER2ST, LightHGGEP_HER2ST_Top250
 from models.LightHGGEP import LightHGGEP
 from torch.utils.data import DataLoader
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 import pytorch_lightning as pl
 
+# Chon class dataset theo DATASET
+DATASET_CLASS = LightHGGEP_HER2ST if DATASET == 'her2st' else LightHGGEP_HER2ST_Top250
+if N_GENES is None:
+    N_GENES = len(DATASET_CLASS(train=True, fold=FOLD, k_neighbors=K_NEIGHBORS).gene_set)
+    print(f"  N_GENES auto = {N_GENES}")
+
 # Dataset
-train_dataset = LightHGGEP_HER2ST(train=True, fold=FOLD, k_neighbors=K_NEIGHBORS)
+train_dataset = DATASET_CLASS(train=True, fold=FOLD, k_neighbors=K_NEIGHBORS)
 # [SỬA - vá lỗi 1+2] Tách 1 slide CỐ ĐỊNH trong 31 slide train làm validation (KHÔNG
 # đụng test_dataset -- giữ đúng nguyên tắc LOOCV: test chỉ dùng 1 lần duy nhất lúc
 # đánh giá cuối, xem PHẦN 6). Chọn theo alphabet cho tái lập được, có thể đổi thủ công
@@ -503,7 +519,7 @@ best_model = LightHGGEP.load_from_checkpoint(
 )
 
 # Set graph cho model (cho test set)
-test_dataset = LightHGGEP_HER2ST(train=False, fold=FOLD, k_neighbors=K_NEIGHBORS)
+test_dataset = DATASET_CLASS(train=False, fold=FOLD, k_neighbors=K_NEIGHBORS)
 for section, A_norm in test_dataset.A_norm_cache.items():
     best_model.set_graph(section, torch.from_numpy(A_norm).float())
 
@@ -524,7 +540,7 @@ adata_pred, adata_gt = lighthggep_predict(best_model, test_loader, device=device
 
 # Common fair evaluation: metrics are always computed on raw log-normalised
 # expression.  Only the visualisation/clustering copy is standardised.
-g = list(np.load('data/her_hvg_cut_1000.npy', allow_pickle=True))
+g = test_dataset.gene_set  # dung dung bo gen cua dataset da chon (785 hoac 250)
 adata_pred, metrics = evaluate_her2st_predictions(
     adata_pred, adata_gt, g, label=label, n_clusters=4)
 R, p_values = metrics['R'], metrics['p_values']
@@ -642,14 +658,15 @@ plt.clf()
 plt.close()
 print(f"Saved: figures/kmeans/Light-HGGEP_kmeans_fold{FOLD}.png")
 
-# FASN gene expression
-sc.pl.spatial(adata_pred, img=None, color="FASN", spot_size=112, 
-              color_map="magma", frameon=False, legend_loc=None, title=None, show=False)
-plt.gca().set_title("")
-plt.savefig(f"figures/FASN/Light-HGGEP_FASN_fold{FOLD}.png", dpi=300, bbox_inches="tight", transparent=True)
-plt.clf()
-plt.close()
-print(f"Saved: figures/FASN/Light-HGGEP_FASN_fold{FOLD}.png")
+# FASN gene expression (chỉ khi FASN nằm trong bộ gen đang dùng)
+if "FASN" in adata_pred.var_names:
+    sc.pl.spatial(adata_pred, img=None, color="FASN", spot_size=112,
+                  color_map="magma", frameon=False, legend_loc=None, title=None, show=False)
+    plt.gca().set_title("")
+    plt.savefig(f"figures/FASN/Light-HGGEP_FASN_fold{FOLD}.png", dpi=300, bbox_inches="tight", transparent=True)
+    plt.clf()
+    plt.close()
+    print(f"Saved: figures/FASN/Light-HGGEP_FASN_fold{FOLD}.png")
 
 # ============================================================================
 # ---- Cell 31 (notebook gốc) ----

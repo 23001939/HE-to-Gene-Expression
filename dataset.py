@@ -196,12 +196,14 @@ class LightHGGEP_HER2ST(torch.utils.data.Dataset):
         self.r = 224 // 2  # patch size = 224
         self.k = k_neighbors
         
-        gene_list = list(np.load('data/her_hvg_cut_1000.npy', allow_pickle=True))
-        self.gene_list = gene_list
-        
         self.names = os.listdir(self.cnt_dir)
         self.names.sort()
         self.names = [i[:2] for i in self.names]
+        # Chon gene list qua hook. LightHGGEP_HER2ST_Top250 override de lay 250 gen co
+        # muc bieu hien trung binh cao nhat; chay TRUOC LOOCV split de train/test instance
+        # ra cung 1 bo gen (khong lech n_genes).
+        self.gene_list = self._select_gene_list()
+        gene_list = self.gene_list
         self.train = train
         
         # LOOCV split (giống ViT_HER2ST)
@@ -272,6 +274,10 @@ class LightHGGEP_HER2ST(torch.utils.data.Dataset):
         self.A_norm_cache = {}
         self._build_graphs()
     
+    def _select_gene_list(self):
+        """Tra ve danh sach gene dung lam dau ra. Base: 785 gene tu file her_hvg_cut_1000."""
+        return list(np.load('data/her_hvg_cut_1000.npy', allow_pickle=True))
+
     def _build_graphs(self):
         """
         Xay dung ma tran ke chuan hoa A_norm cho tung section
@@ -421,3 +427,22 @@ class LightHGGEP_HER2ST(torch.utils.data.Dataset):
         pos = self.get_pos(name)
         meta = cnt.join((pos.set_index('id')))
         return meta
+
+
+class LightHGGEP_HER2ST_Top250(LightHGGEP_HER2ST):
+    """LightHGGEP_HER2ST voi dau ra 250 gen co muc bieu hien trung binh cao nhat.
+
+    Toan bo logic (patch crop, augment, normalization, exp log-normalize, K-NN graph,
+    section_name/local_idx) giong het class goc. Khac duy nhat: gene list duoc chon tu
+    count matrix (TREN TOAN BO section, truoc LOOCV split) thay vi file her_hvg_cut_1000.npy
+    -> train/test instance cung dung 1 bo 250 gen, khong lech n_genes.
+    """
+    def _select_gene_list(self):
+        # Tinh mean bieu hien tung gen tren TAT CA section (chua split) -> 250 gen cao nhat
+        gene_means = {}
+        for name in self.names:
+            cnt = self.get_cnt(name)
+            for g in cnt.columns:
+                gene_means[g] = gene_means.get(g, 0.0) + float(cnt[g].mean())
+        top = sorted(gene_means.items(), key=lambda kv: kv[1], reverse=True)[:250]
+        return [g for g, _ in top]
