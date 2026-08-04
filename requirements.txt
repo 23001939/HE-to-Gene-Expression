@@ -39,7 +39,7 @@ numpy==1.26.4
 nvitop==1.5.0
 openslide-bin==4.0.0.8
 packaging==25.0
-pandas==2.0.3
+pandas==2.1.4
 patsy==1.0.1
 pdfmerger==0.5.0
 pillow==11.2.1
@@ -56,7 +56,7 @@ requests==2.32.3
 scanpy==1.10.3
 scikit-learn
 scipy==1.13.1
-scprep==1.2.3
+scprep
 seaborn==0.13.2
 session_info==1.0.1
 six==1.17.0
