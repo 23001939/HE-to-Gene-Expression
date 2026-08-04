@@ -5,7 +5,7 @@ torchaudio==2.10.0+cu128
 aiohappyeyeballs==2.6.1
 aiohttp
 aiosignal
-anndata==0.10.9
+anndata
 array_api_compat==1.11.2
 async-timeout==5.0.1
 attrs==25.3.0
