@@ -134,6 +134,9 @@ print("So file .tsv trong ST-cnts:", len([f for f in os.listdir(cnt_dir) if f.en
 # ----------------------------------------------------------
 # 2.4 Khoi phuc model_ckpts tu Kaggle Dataset cua session truoc (neu co)
 # ----------------------------------------------------------
+import glob
+import shutil
+
 def restore_dir_from_input(dirname):
     matches = glob.glob(f"/kaggle/input/*/{dirname}") 
     if matches:
