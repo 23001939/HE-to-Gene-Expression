@@ -19,6 +19,9 @@ Tùy chọn:
     --skip_train  : chỉ predict+eval (chỉ dùng khi mode != all)
     --n_gpus      : số GPU dùng (default: 1, giống Light-HGGEP)
 """
+import os
+os.environ["NCCL_P2P_DISABLE"] = "1"
+os.environ["NCCL_SHM_DISABLE"] = "1"   # thêm cùng lúc, cùng họ nguyên nhân
 import scanpy as sc
 import argparse
 import os
