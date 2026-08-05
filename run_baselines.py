@@ -19,7 +19,7 @@ Tùy chọn:
     --skip_train  : chỉ predict+eval (chỉ dùng khi mode != all)
     --n_gpus      : số GPU dùng (default: 1, giống Light-HGGEP)
 """
-
+import scanpy as sc
 import argparse
 import os
 import pathlib
@@ -60,6 +60,11 @@ parser.add_argument("--n_genes",    type=int,   default=785)
 parser.add_argument("--max_epochs", type=int,   default=None)
 parser.add_argument("--batch_size", type=int,   default=None)
 parser.add_argument("--lr",         type=float, default=1e-4)
+parser.add_argument("--histogene_lr", type=float, default=None,
+                    help="LR riêng cho HisToGene (mặc định: dùng chung --lr nếu không set). "
+                         "Lý do cần tách: HisToGene train 1 slide/batch (~15 bước cập nhật/epoch/rank), "
+                         "khác hẳn LightHGGEP (batch=32 patch trong section, nhiều bước cập nhật/epoch hơn) "
+                         "-- dùng chung LR không tính đến chênh lệch này.")
 parser.add_argument("--ckpt_dir",   type=str,   default="model_ckpts")
 parser.add_argument("--ckpt_path",  type=str,   default=None,
                     help="Chỉ dùng khi --mode không phải 'all'")
@@ -494,11 +499,14 @@ for mode in modes_to_run:
     ckpt_p     = args.ckpt_path  if args.mode != "all" else None
     skip_train = args.skip_train if args.mode != "all" else False
 
+    # [MỚI] HisToGene dùng LR riêng nếu được set qua --histogene_lr, không thì fallback về LR chung
+    mode_lr = args.histogene_lr if (mode == "histogene" and args.histogene_lr is not None) else LR
+
     result = run_one(
         mode       = mode,
         fold       = FOLD,
         n_genes    = N_GENES,
-        lr         = LR,
+        lr         = mode_lr,
         max_epochs = max_ep,
         batch_size = bs,
         ckpt_dir   = args.ckpt_dir,
