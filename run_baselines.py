@@ -316,6 +316,22 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
                                     shuffle=False, **eval_loader_options)
         else:
             train_subset, val_subset = split_train_val(ds_aug, ds_noaug)
+            # [MỚI - fix "treo"] HER2ST._get_img_cached() mặc định img_cache_size=1
+            # (dataset.py, dùng chung mọi mode -- KHÔNG sửa file đó để tránh ảnh hưởng
+            # HisToGene/LightHGGEP). HisToGeneSlideDataset gộp nguyên 1 section/lần gọi
+            # nên cache=1 vẫn khớp (không bị trục xuất giữa chừng); nhưng STNet lấy mẫu
+            # theo spot rồi shuffle=True xáo trộn phẳng qua TẤT CẢ section, nên gần như
+            # mỗi __getitem__ kế tiếp rơi vào 1 section khác -- cache=1 bị trục xuất và
+            # giải mã lại ảnh WSI (Image.open().convert("RGB")) liên tục, cực chậm (trông
+            # như treo, không phải deadlock thật). Tăng cache riêng cho 2 instance của
+            # nhánh STNet, đủ giữ hết số slide train trong fold này (loại bỏ thrashing),
+            # chặn trên để tránh tốn RAM nếu sau này dùng fold có nhiều section hơn.
+            n_train_slides = len(set(ds_aug.names))
+            cache_size = min(n_train_slides, 16)
+            ds_aug.img_cache_size = cache_size
+            ds_noaug.img_cache_size = cache_size
+            print(f"  [Fix cache thrashing] img_cache_size: 1 -> {cache_size} "
+                  f"({n_train_slides} slide train trong fold này)")
             train_loader = DataLoader(train_subset, batch_size=bs,
                                       shuffle=True, **loader_options)
             val_loader   = DataLoader(val_subset, batch_size=bs,
