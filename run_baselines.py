@@ -326,12 +326,18 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
             # như treo, không phải deadlock thật). Tăng cache riêng cho 2 instance của
             # nhánh STNet, đủ giữ hết số slide train trong fold này (loại bỏ thrashing),
             # chặn trên để tránh tốn RAM nếu sau này dùng fold có nhiều section hơn.
+            # [SỬA - fix vẫn treo] Cache=16 (giới hạn trước) vẫn KHÔNG đủ: với shuffle=True
+            # + chỉ 31 slide train, riêng 1 batch=32 spot đã có xác suất rất cao chạm gần
+            # hết cả 31 slide (bài toán kiểu birthday-paradox: 32 lần rút ngẫu nhiên trên
+            # 31 giá trị). Cache=16 vẫn bị trục xuất NGAY TRONG 1 BATCH, không chỉ giữa các
+            # batch -- vẫn giải mã lại ảnh WSI liên tục. RAM còn dư (theo bạn kiểm tra,
+            # 14.1/30GiB đang dùng) nên bỏ hẳn giới hạn, cache đủ toàn bộ slide train.
             n_train_slides = len(set(ds_aug.names))
-            cache_size = min(n_train_slides, 16)
+            cache_size = n_train_slides
             ds_aug.img_cache_size = cache_size
             ds_noaug.img_cache_size = cache_size
             print(f"  [Fix cache thrashing] img_cache_size: 1 -> {cache_size} "
-                  f"({n_train_slides} slide train trong fold này)")
+                  f"(= toàn bộ {n_train_slides} slide train trong fold này)")
             train_loader = DataLoader(train_subset, batch_size=bs,
                                       shuffle=True, **loader_options)
             val_loader   = DataLoader(val_subset, batch_size=bs,
