@@ -359,7 +359,6 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
     if n_gpus > 1 and not skip_train:
         trainer.strategy.barrier()
         if not trainer.is_global_zero:
-            trainer.strategy.barrier()
             return None
 
     # ── PREDICT ───────────────────────────────────────────────────────────────
