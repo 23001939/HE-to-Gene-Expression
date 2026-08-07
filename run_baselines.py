@@ -19,7 +19,10 @@ Tùy chọn:
     --skip_train  : chỉ predict+eval (chỉ dùng khi mode != all)
     --n_gpus      : số GPU dùng (default: 1, giống Light-HGGEP)
 """
-
+import os
+os.environ["NCCL_P2P_DISABLE"] = "1"
+os.environ["NCCL_SHM_DISABLE"] = "1"   # thêm cùng lúc, cùng họ nguyên nhân
+import scanpy as sc
 import argparse
 import os
 import pathlib
@@ -60,6 +63,11 @@ parser.add_argument("--n_genes",    type=int,   default=785)
 parser.add_argument("--max_epochs", type=int,   default=None)
 parser.add_argument("--batch_size", type=int,   default=None)
 parser.add_argument("--lr",         type=float, default=1e-4)
+parser.add_argument("--histogene_lr", type=float, default=None,
+                    help="LR riêng cho HisToGene (mặc định: dùng chung --lr nếu không set). "
+                         "Lý do cần tách: HisToGene train 1 slide/batch (~15 bước cập nhật/epoch/rank), "
+                         "khác hẳn LightHGGEP (batch=32 patch trong section, nhiều bước cập nhật/epoch hơn) "
+                         "-- dùng chung LR không tính đến chênh lệch này.")
 parser.add_argument("--ckpt_dir",   type=str,   default="model_ckpts")
 parser.add_argument("--ckpt_path",  type=str,   default=None,
                     help="Chỉ dùng khi --mode không phải 'all'")
@@ -250,9 +258,12 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
     # Đơn giản, không cần spawn, không conflict với num_workers=0.
     # DDP sẽ nhanh hơn nhưng cần multi-process → phức tạp hơn khi chạy từ script.
     if n_gpus > 1 and not skip_train:
-        # HisToGene contains an intentionally unused normalisation module;
-        # enabling this DDP mode is required to train it across two GPUs.
-        strategy = "ddp_find_unused_parameters_true"
+        # HisToGene chứa 1 module normalization cố ý không dùng -> CẦN
+        # find_unused_parameters=True để DDP không báo lỗi. Các mode khác (STNet...)
+        # không có tham số thừa nào -> dùng "ddp" thường, tránh tốn thêm 1 lượt duyệt
+        # toàn bộ đồ thị autograd mỗi bước (đúng cảnh báo PyTorch đã in ra trong log
+        # khi chạy STNet với cờ này).
+        strategy = "ddp_find_unused_parameters_true" if mode == "histogene" else "ddp"
         accelerator = "gpu"
         devices = n_gpus
     elif torch.cuda.is_available():
@@ -305,6 +316,28 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
                                     shuffle=False, **eval_loader_options)
         else:
             train_subset, val_subset = split_train_val(ds_aug, ds_noaug)
+            # [MỚI - fix "treo"] HER2ST._get_img_cached() mặc định img_cache_size=1
+            # (dataset.py, dùng chung mọi mode -- KHÔNG sửa file đó để tránh ảnh hưởng
+            # HisToGene/LightHGGEP). HisToGeneSlideDataset gộp nguyên 1 section/lần gọi
+            # nên cache=1 vẫn khớp (không bị trục xuất giữa chừng); nhưng STNet lấy mẫu
+            # theo spot rồi shuffle=True xáo trộn phẳng qua TẤT CẢ section, nên gần như
+            # mỗi __getitem__ kế tiếp rơi vào 1 section khác -- cache=1 bị trục xuất và
+            # giải mã lại ảnh WSI (Image.open().convert("RGB")) liên tục, cực chậm (trông
+            # như treo, không phải deadlock thật). Tăng cache riêng cho 2 instance của
+            # nhánh STNet, đủ giữ hết số slide train trong fold này (loại bỏ thrashing),
+            # chặn trên để tránh tốn RAM nếu sau này dùng fold có nhiều section hơn.
+            # [SỬA - fix vẫn treo] Cache=16 (giới hạn trước) vẫn KHÔNG đủ: với shuffle=True
+            # + chỉ 31 slide train, riêng 1 batch=32 spot đã có xác suất rất cao chạm gần
+            # hết cả 31 slide (bài toán kiểu birthday-paradox: 32 lần rút ngẫu nhiên trên
+            # 31 giá trị). Cache=16 vẫn bị trục xuất NGAY TRONG 1 BATCH, không chỉ giữa các
+            # batch -- vẫn giải mã lại ảnh WSI liên tục. RAM còn dư (theo bạn kiểm tra,
+            # 14.1/30GiB đang dùng) nên bỏ hẳn giới hạn, cache đủ toàn bộ slide train.
+            n_train_slides = len(set(ds_aug.names))
+            cache_size = n_train_slides
+            ds_aug.img_cache_size = cache_size
+            ds_noaug.img_cache_size = cache_size
+            print(f"  [Fix cache thrashing] img_cache_size: 1 -> {cache_size} "
+                  f"(= toàn bộ {n_train_slides} slide train trong fold này)")
             train_loader = DataLoader(train_subset, batch_size=bs,
                                       shuffle=True, **loader_options)
             val_loader   = DataLoader(val_subset, batch_size=bs,
@@ -348,7 +381,6 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
     if n_gpus > 1 and not skip_train:
         trainer.strategy.barrier()
         if not trainer.is_global_zero:
-            trainer.strategy.barrier()
             return None
 
     # ── PREDICT ───────────────────────────────────────────────────────────────
@@ -494,11 +526,14 @@ for mode in modes_to_run:
     ckpt_p     = args.ckpt_path  if args.mode != "all" else None
     skip_train = args.skip_train if args.mode != "all" else False
 
+    # [MỚI] HisToGene dùng LR riêng nếu được set qua --histogene_lr, không thì fallback về LR chung
+    mode_lr = args.histogene_lr if (mode == "histogene" and args.histogene_lr is not None) else LR
+
     result = run_one(
         mode       = mode,
         fold       = FOLD,
         n_genes    = N_GENES,
-        lr         = LR,
+        lr         = mode_lr,
         max_epochs = max_ep,
         batch_size = bs,
         ckpt_dir   = args.ckpt_dir,
