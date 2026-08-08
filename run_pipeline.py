@@ -76,13 +76,10 @@ print("Logger:", default_logger)
 import os
 import pathlib
 
-# [SỬA lỗi #6] WORKDIR không còn hardcode "/kaggle/working" -- tự phát hiện môi trường:
-# trên Kaggle dùng /kaggle/working như cũ; trên môi trường khác (local, Colab) dùng thư
-# mục chứa file này để tránh FileNotFoundError khi os.chdir().
-if os.path.isdir("/kaggle/working"):
-    WORKDIR = "/kaggle/working"
-else:
-    WORKDIR = str(pathlib.Path(__file__).parent.resolve())
+# [SỬA lỗi #6] WORKDIR luôn = thư mục chứa file này (repo root) -- đúng trên mọi môi
+# trường (Kaggle, local, Colab). Trước đây Kaggle dùng /kaggle/working nhưng clone repo
+# vào /kaggle/working/HE-to-Gene-Expression/ nên path data/... resolve sai.
+WORKDIR = str(pathlib.Path(__file__).parent.resolve())
 os.chdir(WORKDIR)
 
 # Cac thu muc se duoc tao trong qua trinh chay:
