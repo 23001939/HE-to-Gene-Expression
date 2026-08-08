@@ -1,4 +1,6 @@
-"""run_pipeline.py -- Toàn bộ pipeline train/predict/eval/visualize Light-HGGEP trên HER2ST.
+"""
+
+run_pipeline.py -- Toàn bộ pipeline train/predict/eval/visualize Light-HGGEP trên HER2ST.
 
 File này được TÁCH RA NGUYÊN VẸN từ các cell code của LightHGGEP.ipynb (PHẦN 1, 2, 4, 5,
 6, 7, 8, 9 -- KHÔNG bao gồm PHẦN 3, vốn đã tách thành utils.py / predict.py / dataset.py /
@@ -242,42 +244,29 @@ class SectionBatchSampler(Sampler):
             self.section_indices = {k: v for k, v in self.section_indices.items()
                                      if k not in set(exclude_sections)}
         
-        # [SỬA lỗi hồi quy - phát hiện của người dùng] 1 batch = NGUYÊN 1 section, KHÔNG
-        # cắt nhỏ theo batch_size nữa. models/LightHGGEP.py forward() đã được viết đúng
-        # cho giả định này từ trước (A_norm_full[local_indices][:, local_indices] chỉ có
-        # ý nghĩa khi local_indices là ĐỦ N spot của section, không phải 1 tập con ngẫu
-        # nhiên) -- chỉ riêng Sampler này (viết để vá 1 lỗi KHÁC: trộn nhiều section vào
-        # 1 batch) chưa kế thừa fix đó, vô tình làm sống lại đúng bug cũ: cắt mỗi section
-        # thành lô <=batch_size spot ngẫu nhiên, khiến A_norm_batch mất phần lớn láng
-        # giềng KNN thật của mỗi spot (kỳ vọng chỉ còn ~K*(batch_size-1)/(N-1) láng giềng
-        # sống sót, rất nhỏ khi N=200-2000 >> batch_size=32).
-        #
-        # self.cnn_chunk (bên trong model, ĐỘC LẬP với Sampler này) vẫn tiếp tục xử lý
-        # việc chia nhỏ CNN nội bộ để tránh OOM -- không bị ảnh hưởng bởi thay đổi này.
-        #
-        # A rank owns complete sections: spatial graphs are never split across GPUs.
-        # Cân bằng bin-packing giờ theo SỐ SPOT (ước lượng thời gian CNN forward), không
-        # còn theo "số batch" nữa -- vì mỗi section giờ LUÔN đúng 1 batch, "số batch"
-        # không còn phản ánh được sự khác biệt thời gian giữa section nhỏ và section lớn.
+        # A rank owns complete sections: spatial graphs are never split across
+        # GPUs.  Greedy bin-packing balances *batch counts*, not merely section
+        # counts, because HER2ST sections have very different spot counts.
         self.section_names = list(self.section_indices.keys())
-        self.steps_per_epoch = len(self.section_names)   # 1 section = 1 step
-
+        self.steps_per_epoch = sum(math.ceil(len(v) / self.batch_size)
+                                   for v in self.section_indices.values())
         if shard_sections and num_replicas > 1:
             bins = [([], 0) for _ in range(num_replicas)]
             names_by_size = sorted(
                 self.section_names,
-                key=lambda name: len(self.section_indices[name]),
+                key=lambda name: math.ceil(len(self.section_indices[name]) / self.batch_size),
                 reverse=True,
             )
             for name in names_by_size:
                 target = min(range(num_replicas), key=lambda i: bins[i][1])
-                n_spots = len(self.section_indices[name])
+                batch_count = math.ceil(len(self.section_indices[name]) / self.batch_size)
                 bins[target][0].append(name)
-                bins[target] = (bins[target][0], bins[target][1] + n_spots)
-            # DDP needs an identical number of optimizer steps on every rank -- giờ 1
-            # section = 1 step, nên số step mỗi rank = số section rank đó được giao.
+                bins[target] = (bins[target][0], bins[target][1] + batch_count)
+            # DDP needs an identical number of optimizer steps on every rank.
+            # The very small excess is dropped after shuffling, so it rotates
+            # between sections across epochs instead of permanently omitting one.
             self.section_names = bins[rank][0]
-            self.steps_per_epoch = min(len(b[0]) for b in bins)
+            self.steps_per_epoch = min(total for _, total in bins)
 
     def __iter__(self):
         section_names = self.section_names.copy()
@@ -285,17 +274,15 @@ class SectionBatchSampler(Sampler):
             random.shuffle(section_names)
         emitted = 0
         for name in section_names:
-            if emitted >= self.steps_per_epoch:
-                return
             idxs = list(self.section_indices[name])
             if self.shuffle:
-                # Xáo trong section vẫn AN TOÀN: idxs vẫn là ĐỦ N chỉ số của section,
-                # A_norm_full[idxs][:, idxs] chỉ hoán vị hàng/cột của CHÍNH A_norm_full,
-                # KHÔNG mất cạnh nào -- khác hẳn trước đây khi idxs chỉ là 1 tập con
-                # ngẫu nhiên batch_size/N (mất phần lớn láng giềng thật).
                 random.shuffle(idxs)
-            yield idxs   # NGUYÊN section, không cắt theo batch_size nữa
-            emitted += 1
+            # Cắt thành các batch nhỏ theo BATCH_SIZE
+            for s in range(0, len(idxs), self.batch_size):
+                if emitted >= self.steps_per_epoch:
+                    return
+                yield idxs[s:s + self.batch_size]
+                emitted += 1
 
     def __len__(self):
         return self.steps_per_epoch
