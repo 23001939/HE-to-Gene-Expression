@@ -516,7 +516,13 @@ test_loader = DataLoader(test_dataset, batch_sampler=test_sampler,
 
 # Predict
 label = test_dataset.label[test_dataset.names[0]]
+if torch.cuda.is_available():
+    torch.cuda.synchronize()
+_t0 = time.perf_counter()
 adata_pred, adata_gt = lighthggep_predict(best_model, test_loader, device=device)
+if torch.cuda.is_available():
+    torch.cuda.synchronize()
+inference_time_total_s = time.perf_counter() - _t0
 
 # Common fair evaluation: metrics are always computed on raw log-normalised
 # expression.  Only the visualisation/clustering copy is standardised.
@@ -536,6 +542,9 @@ print("="*70)
 
 # Thông tin tổng quan
 n_spots = adata_pred.shape[0]
+inference_time_per_spot_ms = 1000.0 * inference_time_total_s / max(n_spots, 1)
+print(f"  [INFER TIME] total={inference_time_total_s:.3f}s "
+      f"({n_spots} spot) -> {inference_time_per_spot_ms:.3f} ms/spot")
 mean_pcc      = metrics['pearson']
 median_pcc    = metrics['median_pearson']
 std_pcc       = np.nanstd(R)
@@ -665,6 +674,9 @@ results = pd.DataFrame([{
     'morans_i_pred':  np.nanmean(morans['pred']),
     'morans_i_gt':    np.nanmean(morans['gt']),
     'params':         total_params,
+    'inference_time_total_s':     inference_time_total_s,
+    'inference_time_per_spot_ms': inference_time_per_spot_ms,
+    'n_test_spots':   n_spots,
     'best_val_loss':  float(checkpoint_callback.best_model_score),
     'eval_protocol':  PROTOCOL_NAME,
     'split_rule':     'LOOCV test=fold; validation=first alphabetical train slide',

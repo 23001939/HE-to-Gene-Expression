@@ -396,14 +396,31 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
             learning_rate=lr, max_epochs=max_ep)
         test_loader = DataLoader(test_dataset, batch_size=1,
                                  shuffle=False, **eval_loader_options)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        _t0 = time.perf_counter()
         adata_pred, adata_gt = histogene_predict(m, test_loader, device=device)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        inference_time_total_s = time.perf_counter() - _t0
 
     elif mode == "stnet":
         m = STModel.load_from_checkpoint(
             ckpt_path, n_genes=n_genes, learning_rate=lr, max_epochs=max_ep)
         test_loader = DataLoader(test_dataset, batch_size=bs,
                                  shuffle=False, **eval_loader_options)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        _t0 = time.perf_counter()
         adata_pred, adata_gt = stnet_predict(m, test_loader, device=device)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        inference_time_total_s = time.perf_counter() - _t0
+
+    n_test_spots = adata_pred.shape[0]
+    inference_time_per_spot_ms = 1000.0 * inference_time_total_s / max(n_test_spots, 1)
+    print(f"  [INFER TIME] total={inference_time_total_s:.3f}s "
+          f"({n_test_spots} spot) -> {inference_time_per_spot_ms:.3f} ms/spot")
 
     # ── Common, fair evaluation ───────────────────────────────────────────────
     g = list(np.load("data/her_hvg_cut_1000.npy", allow_pickle=True))
@@ -480,6 +497,9 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
         "morans_i_pred": mean_mi_pred,
         "morans_i_gt":   mean_mi_gt,
         "params":        total_params,
+        "inference_time_total_s":   inference_time_total_s,
+        "inference_time_per_spot_ms": inference_time_per_spot_ms,
+        "n_test_spots":  n_test_spots,
         "ckpt":          ckpt_path,
         "eval_protocol": PROTOCOL_NAME,
         "split_rule":    "LOOCV test=fold; validation=first alphabetical train slide",
