@@ -8,6 +8,7 @@ from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import adjusted_rand_score as ari_score
 from sklearn.metrics import normalized_mutual_info_score as nmi_score
 from sklearn.metrics import mean_squared_error, mean_absolute_error
+from graph_construction import calcADJ
 
 MODEL_PATH = ''
 
@@ -326,6 +327,71 @@ def histogene_predict(model, test_loader, device=torch.device('cpu')):
     with torch.no_grad():
         pred = model(patch_flat, locs_long)   # (1, N, n_genes)
     pred = pred.squeeze(0).cpu().numpy()      # (N, n_genes)
+
+    centers_np = centers.numpy()
+    exps_np    = exps.numpy()
+
+    adata_pred = ann.AnnData(pred)
+    adata_pred.obsm['spatial'] = centers_np
+
+    adata_gt = ann.AnnData(exps_np)
+    adata_gt.obsm['spatial'] = centers_np
+
+    return adata_pred, adata_gt
+
+
+def thitogene_predict(model, test_loader, device=torch.device('cpu')):
+    """
+    [MỚI] Predict function cho THItoGene dùng HER2ST dataset -- mô phỏng ĐÚNG cấu trúc
+    histogene_predict() ở trên (cùng cách gộp section, cùng crop 112px trung tâm, cùng
+    discretize loc), CHỈ khác 2 điểm do kiến trúc THItoGene yêu cầu:
+      1) KHÔNG flatten patch (THItoGene.forward() cần (1,N,C,H,W) ảnh thật, không phải
+         vector patch_dim như HisToGene).
+      2) Tính thêm ma trận kề calcADJ(k=4, pruneTag='NA') từ toạ độ GỐC (loc, trước khi
+         clamp về [0,63] cho Embedding) -- đúng cách THItoGeneSlideDataset làm lúc train
+         (run_baselines.py), để suy luận nhất quán với lúc huấn luyện.
+
+    HER2ST test trả về patch-level: (patch, loc, exp, center)
+      patch  : (B, 3, H, W)
+      loc    : (B, 2)   -- tọa độ grid float
+      exp    : (B, n_genes)
+      center : (B, 2)   -- tọa độ pixel
+
+    Vì test chỉ có 1 section (LOOCV), load hết rồi forward 1 lần.
+    """
+    model.eval()
+    model = model.to(device)
+
+    all_patches, all_locs, all_exps, all_centers = [], [], [], []
+    for batch in test_loader:
+        patch, loc, exp, center = batch
+        all_patches.append(patch)
+        all_locs.append(loc)
+        all_exps.append(exp)
+        all_centers.append(center)
+
+    patches = torch.cat(all_patches, dim=0)   # (N, 3, H, W)
+    locs    = torch.cat(all_locs,    dim=0)   # (N, 2) -- tọa độ GỐC, dùng cho calcADJ
+    exps    = torch.cat(all_exps,    dim=0)   # (N, n_genes)
+    centers = torch.cat(all_centers, dim=0)   # (N, 2)
+
+    # Model được train với crop 112px trung tâm -- giữ suy luận đồng nhất dù HER2ST lưu
+    # patch 224px.
+    if patches.shape[-2:] != (112, 112):
+        h, w = patches.shape[-2:]
+        top, left = (h - 112) // 2, (w - 112) // 2
+        patches = patches[:, :, top:top + 112, left:left + 112]
+
+    N = patches.shape[0]
+    patches_batched = patches.unsqueeze(0).to(device)         # (1, N, 3, 112, 112) -- KHÔNG flatten
+
+    locs_long = locs.long().clamp(0, 63).unsqueeze(0).to(device)  # (1, N, 2) -- n_pos=64
+
+    adj = calcADJ(locs.numpy().astype(float), k=4, pruneTag="NA").to(device)  # (N, N), 0/1 thô
+
+    with torch.no_grad():
+        pred = model(patches_batched, locs_long, adj)   # (1, N, n_genes)
+    pred = pred.reshape(N, -1).cpu().numpy()
 
     centers_np = centers.numpy()
     exps_np    = exps.numpy()

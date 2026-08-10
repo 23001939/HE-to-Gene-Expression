@@ -7,6 +7,11 @@ Cách dùng:
     python run_baselines.py --mode all          # chạy các baseline tương thích liên tiếp
     python run_baselines.py --mode stnet        # chạy riêng 1 model
     python run_baselines.py --mode histogene
+    python run_baselines.py --mode thitogene    # [MỚI] kiến trúc THItoGene gốc (ODConv2d +
+                                                 # EfficientCapsNet + ViT + GAT), dùng CÙNG
+                                                 # tiền xử lý/train/loss với 3 model kia --
+                                                 # KHÔNG gộp vào --mode all (tránh đổi hành
+                                                 # vi "all" đang có, gọi riêng khi cần).
 
 Tùy chọn:
     --fold        : LOOCV fold (default: 5)
@@ -56,8 +61,9 @@ os.chdir(WORKDIR)
 # ── Argument parsing ──────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Baseline pipeline cho HER2ST")
 parser.add_argument("--mode",       type=str, required=True,
-                    choices=["histogene", "stnet", "all"],
-                    help="Model muốn chạy. 'all' = chạy các baseline tương thích giao thức chung.")
+                    choices=["histogene", "stnet", "thitogene", "all"],
+                    help="Model muốn chạy. 'all' = chạy các baseline tương thích giao thức chung "
+                         "(histogene+stnet, KHÔNG gồm thitogene -- gọi riêng nếu cần).")
 parser.add_argument("--fold",       type=int,   default=5)
 parser.add_argument("--n_genes",    type=int,   default=785)
 parser.add_argument("--max_epochs", type=int,   default=None)
@@ -110,7 +116,8 @@ from pytorch_lightning.loggers import CSVLogger
 
 from dataset import HER2ST
 from evaluation import PROTOCOL_NAME, evaluate_her2st_predictions
-from predict import stnet_predict, histogene_predict
+from predict import stnet_predict, histogene_predict, thitogene_predict
+from graph_construction import calcADJ
 
 # ── Callback: log mỗi epoch ra stdout ────────────────────────────────────────
 class EpochProgressBar(Callback):
@@ -151,8 +158,8 @@ class EpochProgressBar(Callback):
         )
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-_default_epochs = {"histogene": 100, "stnet": 100, "uni": 50, "wsuni": 50}
-_default_bs     = {"histogene": 1,   "stnet": 32,  "uni": 16, "wsuni": 16}
+_default_epochs = {"histogene": 100, "stnet": 100, "thitogene": 100, "uni": 50, "wsuni": 50}
+_default_bs     = {"histogene": 1,   "stnet": 32,  "thitogene": 1,   "uni": 16, "wsuni": 16}
 
 
 class HisToGeneSlideDataset(Dataset):
@@ -183,6 +190,44 @@ class HisToGeneSlideDataset(Dataset):
             locations.append(location.long().clamp(0, 63))
             expressions.append(expression)
         return torch.stack(patches), torch.stack(locations), torch.stack(expressions)
+
+
+class THItoGeneSlideDataset(Dataset):
+    """[MỚI] Mô phỏng ĐÚNG HisToGeneSlideDataset ở trên (cùng cách gộp section, cùng crop
+    112px trung tâm) -- CHỈ khác 2 điểm, do kiến trúc THItoGene yêu cầu:
+      1) KHÔNG flatten patch (THItoGene.forward() cần (B,N,C,H,W) để đưa qua ODConv2d --
+         ảnh, không phải vector) -- HisToGene flatten vì ViT của nó nhận patch_dim thẳng.
+      2) Tính thêm ma trận kề k-NN (calcADJ, k=4, KHÔNG chuẩn hoá -- đúng bản gốc THItoGene,
+         MultiHeadGAT tự làm attention/softmax bên trong, không cần D^-1/2(A+I)D^-1/2 như
+         SGC của LightHGGEP) từ toạ độ location GỐC (trước khi clamp về [0,63] cho Embedding
+         -- tránh làm méo khoảng cách hình học thật giữa các spot).
+    """
+    def __init__(self, spot_dataset, section_indices):
+        self.spot_dataset = spot_dataset
+        self.section_indices = section_indices
+
+    def __len__(self):
+        return len(self.section_indices)
+
+    def __getitem__(self, index):
+        patches, locations_raw, locations, expressions = [], [], [], []
+        for spot_index in self.section_indices[index]:
+            item = self.spot_dataset[spot_index]
+            patch, location, expression = item[:3]
+            h, w = patch.shape[-2:]
+            top, left = (h - 112) // 2, (w - 112) // 2
+            patch = patch[:, top:top + 112, left:left + 112]
+            patches.append(patch)                       # KHÔNG flatten
+            locations_raw.append(location.float())        # GIỮ NGUYÊN cho calcADJ (chưa clamp)
+            locations.append(location.long().clamp(0, 63))
+            expressions.append(expression)
+        patches_t     = torch.stack(patches)             # (N, 3, 112, 112)
+        locations_t   = torch.stack(locations)            # (N, 2), đã clamp cho Embedding
+        expressions_t = torch.stack(expressions)          # (N, n_genes)
+
+        coords_np = torch.stack(locations_raw).numpy().astype(float)
+        adj = calcADJ(coords_np, k=4, pruneTag="NA")       # (N, N), 0/1 thô, đúng bản gốc THItoGene
+        return patches_t, locations_t, expressions_t, adj
 
 def split_train_val(ds_aug, ds_noaug):
     """
@@ -218,6 +263,23 @@ def split_histo_train_val(ds_aug, ds_noaug):
             HisToGeneSlideDataset(ds_noaug, val_sections))
 
 
+def split_thitogene_train_val(ds_aug, ds_noaug):
+    """[MỚI] Y hệt split_histo_train_val (cùng luật chọn val slide, cùng cách gộp section) --
+    chỉ đổi class wrapper sang THItoGeneSlideDataset để có thêm adj."""
+    val_name = sorted(ds_aug.names)[0]
+    sections = []
+    start = 0
+    for i, end in enumerate(ds_aug.cumlen):
+        sections.append((ds_aug.id2name[i], list(range(start, int(end)))))
+        start = int(end)
+    train_sections = [indices for name, indices in sections if name != val_name]
+    val_sections = [indices for name, indices in sections if name == val_name]
+    print(f"  Val slide : {val_name} ({len(val_sections[0])} spots) | "
+          f"Train slides: {len(train_sections)}")
+    return (THItoGeneSlideDataset(ds_aug, train_sections),
+            THItoGeneSlideDataset(ds_noaug, val_sections))
+
+
 def collate_drop_center(batch):
     """
     HER2ST(train=False) trả về 4 phần tử (patch, loc, exp, center).
@@ -234,6 +296,7 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
 
     from models.HisToGene_model import HisToGene
     from models.STNet_model import STModel
+    from models.THItoGene_model import THItoGene
 
     max_ep = max_epochs if max_epochs is not None else _default_epochs[mode]
     bs     = batch_size if batch_size is not None else _default_bs[mode]
@@ -279,6 +342,7 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
     _monitor = {
         "histogene": "valid_loss",
         "stnet":     "valid_loss",
+        "thitogene": "valid_loss",
         "uni":       "val_loss",
         "wsuni":     "val_loss",
     }
@@ -310,6 +374,15 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
             train_subset, val_subset = split_histo_train_val(ds_aug, ds_noaug)
             # Sections have different spot counts, therefore they cannot be
             # stacked together.  One complete section is one training sample.
+            train_loader = DataLoader(train_subset, batch_size=1,
+                                      shuffle=True, **loader_options)
+            val_loader = DataLoader(val_subset, batch_size=1,
+                                    shuffle=False, **eval_loader_options)
+        elif mode == "thitogene":
+            # [MỚI] Cùng lý do với HisToGene: THItoGene cần ViT+GAT nhìn toàn bộ 1 section
+            # cùng lúc -- batch_size=1 ở DataLoader, mỗi "batch" là 1 section trọn vẹn
+            # (patches, centers, exp, adj), THItoGeneSlideDataset đã gộp sẵn.
+            train_subset, val_subset = split_thitogene_train_val(ds_aug, ds_noaug)
             train_loader = DataLoader(train_subset, batch_size=1,
                                       shuffle=True, **loader_options)
             val_loader = DataLoader(val_subset, batch_size=1,
@@ -349,6 +422,13 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
                               learning_rate=lr, max_epochs=max_ep)
         elif mode == "stnet":
             model = STModel(n_genes=n_genes, learning_rate=lr, max_epochs=max_ep)
+        elif mode == "thitogene":
+            # [MỚI] Giữ nguyên mọi siêu tham số KIẾN TRÚC ở giá trị mặc định của bản gốc
+            # THItoGene (n_layers=4, dim=1024, heads=(16,8), caps=20, route_dim=64,
+            # patch_size=112 bắt buộc theo đúng shape EfficientCapsNet) -- chỉ learning_rate/
+            # max_epochs theo budget chung của pipeline này.
+            model = THItoGene(patch_size=112, n_genes=n_genes,
+                              learning_rate=lr, max_epochs=max_ep)
 
         trainer = pl.Trainer(
             accelerator=accelerator,
@@ -413,6 +493,22 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
             torch.cuda.synchronize()
         _t0 = time.perf_counter()
         adata_pred, adata_gt = stnet_predict(m, test_loader, device=device)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        inference_time_total_s = time.perf_counter() - _t0
+
+    elif mode == "thitogene":
+        m = THItoGene.load_from_checkpoint(
+            ckpt_path, patch_size=112, n_genes=n_genes,
+            learning_rate=lr, max_epochs=max_ep)
+        # Giống HisToGene: test dataset trả về theo spot (batch_size=1), thitogene_predict
+        # tự gộp lại thành 1 section (LOOCV test chỉ có 1 section) + tự tính adj.
+        test_loader = DataLoader(test_dataset, batch_size=1,
+                                 shuffle=False, **eval_loader_options)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        _t0 = time.perf_counter()
+        adata_pred, adata_gt = thitogene_predict(m, test_loader, device=device)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         inference_time_total_s = time.perf_counter() - _t0
@@ -508,7 +604,7 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
         "learning_rate": lr,
         "optimizer":     "AdamW(weight_decay=1e-4)",
         "scheduler":     "CosineAnnealingLR(T_max=max_epochs,eta_min=1e-6)",
-        "batch_size":    1 if mode == "histogene" else bs,
+        "batch_size":    1 if mode in ("histogene", "thitogene") else bs,
         "seed":          42,
         "n_gpus":        n_gpus,
         "precision":     "16-mixed" if torch.cuda.is_available() else "32-true",
