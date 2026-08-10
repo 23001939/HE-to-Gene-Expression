@@ -53,7 +53,12 @@ class RoutingLayer(nn.Module):
     def forward(self, input):
         u = torch.einsum("...ji,kjiz->...kjz", input, self.W)
         c = torch.einsum("...ij,...kj->...i", u, u)[..., None]
-        c = c / torch.sqrt(torch.Tensor([self.dim_capsules]).type(torch.FloatTensor))
+        c = c / (self.dim_capsules ** 0.5)   # [SỬA - bug có sẵn trong file gốc THItoGene]
+        # Bản gốc: c / torch.sqrt(torch.Tensor([self.dim_capsules]).type(torch.FloatTensor))
+        # -- tạo tensor CPU CỨNG, chia cho c (ở GPU khi model.to(cuda)) -> RuntimeError
+        # device mismatch. self.dim_capsules là số Python thường (int), sqrt bằng ** 0.5
+        # cho ĐÚNG kết quả toán học y hệt, không tạo tensor CPU nào -> không còn lệch device
+        # dù chạy CPU hay GPU.
         c = torch.softmax(c, axis=1)
         c = c + self.b
         s = torch.sum(torch.mul(u, c), dim=-2)
