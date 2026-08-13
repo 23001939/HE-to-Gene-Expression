@@ -174,15 +174,19 @@ FOLD = 5
 _p = argparse.ArgumentParser()
 _p.add_argument('--datasets', choices=['her2st', 'her2st_top250', 'brainst'], default='her2st',
                 help="Dataset dung cho training/eval (mac dinh: her2st)")
-_p.add_argument('--no_sgc', action='store_true',
-                help="Tat Spatial SGC (chi dung CNN embedding). Mac dinh BAT SGC. "
-                     "Dung flag nay de debug PCC (xac nhan SGC co phang prediction khong).")
+_p.add_argument('--use_sgc', action='store_true',
+                help="BAT Spatial SGC (GCN nhe 2-hop, phai feed nguyen section -> "
+                     "BATCH_SIZE=max(section)). Mac dinh TAT (CNN thuan, PCC cao hon"
+                     " tren HER2ST: 0.259 vs 0.189 voi SGC). Dung de thu nghiem SGC.")
 _p.add_argument('--no_sgc_nonlinear', action='store_true',
-                help="Tat phi tuyen cua SGC (quay ve SGC thuan tuyen goc: Linear "
-                     "khong activation). Mac dinh BAT phi tuyen (GCN nhe 2-hop ReLU).")
+                help="Chi voi --use_sgc: tat phi tuyen (SGC thuan tuyen goc). Mac dinh "
+                     "co phi tuyen ReLU.")
 _args = _p.parse_args()
 DATASET = _args.datasets
-USE_SGC = not _args.no_sgc
+# [SGC] AB chung to SGC lam giam PCC tren HER2ST (0.189 vs 0.259 CNN thuan).
+# Nen mac dinh TAT SGC (CNN thuan, batch 32, nhanh + tot hon). Chi bat khi
+# user chi dinh --use_sgc de thu nghiem.
+USE_SGC = _args.use_sgc
 SGC_NONLINEAR = not _args.no_sgc_nonlinear
 N_GENES = None  # tu dong lay tu dataset gene_set neu de None
 MAX_EPOCHS = 100
@@ -408,6 +412,8 @@ print(f"Slide dùng làm validation (tách từ tập train, KHÔNG phải test_
 train_override = None
 val_override = None
 if DATASET == 'brainst':
+    # BRAIN-ST chi co the chay SGC (1 batch = nguyen tile) -> bat SGC bat buoc.
+    USE_SGC = True
     VAL_SECTION = train_dataset.val_tile
     _n_train = sum(train_dataset.lengths) - train_dataset.lengths[train_dataset.names.index(VAL_SECTION)]
     print(f"[BRAIN-ST] tile split: train={_n_train} val={train_dataset.lengths[train_dataset.names.index(VAL_SECTION)]} "
@@ -416,10 +422,9 @@ if DATASET == 'brainst':
 # [SGC] de SGC THUC SU chay, moi batch phai = NGUYEN 1 section (z_spot.shape[0]
 # == A_norm.shape[0]). Nen BATCH_SIZE phai >= section dai nhat -> moi section
 # thanh dung 1 batch (SectionBatchSampler cat theo BATCH_SIZE, section nho hon
-# BATCH_SIZE se thanh 1 batch). Ap dung cho MOI dataset bat SGC (her2st lẫn
-# brainst). HER2ST max section = 712 spot ~ tile brainst 697 -> chunk(64)+
-# checkpoint da chung minh khong OOM tren T4. Neu tat SGC (--no_sgc) giu
-# BATCH_SIZE=32 nhanh hon.
+# BATCH_SIZE se thanh 1 batch). Chi ap dung khi USE_SGC bat (HER2ST mac dinh
+# TAT -> batch 32 nhanh + PCC cao hon; brainst bat buoc SGC). chunk(64)+
+# checkpoint da chung minh 712/697 spot khong OOM tren T4.
 if USE_SGC:
     BATCH_SIZE = max(train_dataset.lengths)
     print(f"[SGC] BATCH_SIZE = {BATCH_SIZE} (full section/batch -> SGC enabled, "
