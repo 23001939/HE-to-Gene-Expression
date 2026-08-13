@@ -16,8 +16,11 @@ pip install --only-binary :all: scprep opencv-python-headless albumentations ein
 ```bash
 python run_pipeline.py --datasets brainst
 ```
-- Tự động: download V1_Adult_Mouse_Brain, build KNN graph, chia spot-level 80/20
-  (train 2162 / val 540), train 100 epoch, eval PCC/RMSE/Moran's I.
+- Tự động: download V1_Adult_Mouse_Brain, chia 2702 spot thành 4 tile (lưới 2×2
+  theo tọa độ), build KNN graph riêng từng tile (676×676), val = 1 tile cố định
+  (~25%), train = 3 tile còn lại (~75%), mỗi batch = nguyên 1 tile để SGC chạy
+  đúng trên ma trận kề tile và không OOM. Train 100 epoch, eval PCC/RMSE/Moran's I
+  trên toàn bộ 4 tile.
 - Kết quả lưu: `Light-HGGEP_results.csv`, `gene_predictions_stats.csv`,
   `figures/Light-HGGEP_*_fold5.png`.
 
@@ -43,8 +46,9 @@ python run_baselines.py --mode all --datasets brainst # baseline BRAIN-ST
 Đọc PCC / RMSE / Moran's I từ các file CSV để so sánh công bằng.
 
 ## 5. Lưu ý
-- BRAIN-ST chỉ 1 section → không có LOOCV. Split là spot-level 80/20 cố định
-  (seed=42), không phải fold.
+- BRAIN-ST chia 1 section thành 4 tile (mỗi tile = 1 "section" riêng). Val = 1
+  tile cố định, train = 3 tile còn lại. Không có LOOCV, không phải fold. Mỗi
+  batch huấn luyện = nguyên 1 tile (SGC đúng trên kề tile, không OOM).
 - `n_genes` tự override = 250 (Top250 của section), không dùng `her_hvg_cut_1000.npy`.
 - Không vẽ FASN nếu gene đó không nằm trong Top250 (tự động fallback gene đầu).
 - Ảnh H&E load từ `adata.uns['spatial'][...]['images']['hires']` (ndarray),

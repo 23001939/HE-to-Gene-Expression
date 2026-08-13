@@ -440,8 +440,11 @@ class LightHGGEP_BRAINST(LightHGGEP_HER2ST):
         full-res pixel) thay vi doc tu file .tif WSI.
       - Toa do spot la adata.obsm['spatial'] (full-res pixel) thay vi
         ['pixel_x','pixel_y'] cua HER2ST.
-      - Chi CO 1 section (mouse brain) nen LOOCV vo nghia -> khong split fold,
-        train/val cat theo slide duy nhat (VAL_SECTION = chinh section do).
+      - Mouse brain 2702 spot chia thanh 4 tile (luoi 2x2 theo toa do) -> moi
+        tile la 1 "section" rieng (exp/center/loc/A_norm doc lap). LOOCV vo
+        nghia -> val = 1 tile co dinh (~25%), train = 3 tile con lai (~75%).
+        Moi batch = nguyen 1 tile (~676 spot) de SGC chay dung (676x676) va
+        khong OOM.
       - Gene list (Top250) tinh tren count matrix giong LightHGGEP_HER2ST_Top250.
     """
     def __init__(self, train=True, fold=0, k_neighbors=4, sample_id='V1_Adult_Mouse_Brain'):
@@ -456,19 +459,6 @@ class LightHGGEP_BRAINST(LightHGGEP_HER2ST):
         print('Loading V1_Adult_Mouse_Brain via scanpy ...')
         self._brain_adata = None
         meta = self.get_meta(sample_id)   # tai 1 lan, cache
-        self.names = [sample_id]
-        self.id2name = {0: sample_id}
-        self.meta_dict = {sample_id: meta}
-        self.lengths = [len(meta)]
-        self.cumlen = np.cumsum(self.lengths)
-
-        self.label = {sample_id: None}
-        self.lbl2id = {
-            'invasive cancer': 0, 'breast glands': 1, 'immune infiltrate': 2,
-            'cancer in situ': 3, 'connective tissue': 4, 'adipose tissue': 5, 'undetermined': -1,
-        }
-        # BRAINST khong co label -> tat ca -1
-        self.label[sample_id] = torch.full((len(meta),), -1)
 
         # [CHUẨN 10x / paper] tiền xử lý expression:
         #   1) library-size normalize trên TOÀN BỘ matrix (không chỉ 250 gene)
@@ -489,12 +479,58 @@ class LightHGGEP_BRAINST(LightHGGEP_HER2ST):
         self.gene_list = gene_list
         self.gene_set = list(gene_list)
         exp_mat = log[:, top_idx]                        # (N, 250) log-count, không z-score
-        self.exp_dict = {sample_id: exp_mat}
 
         # center: full-res pixel tu obsm['spatial']; loc: chinh center (dung lam input)
         coords = np.asarray(meta.obsm['spatial'], dtype=np.int64)
-        self.center_dict = {sample_id: coords}
-        self.loc_dict = {sample_id: coords.astype(float)}
+
+        # [HƯỚNG A] Chia 2702 spot thành 4 tile (lưới 2x2 theo tọa độ x/y).
+        # MỖI tile = 1 "section" riêng với ~676 spot, exp_dict/center_dict/
+        # loc_dict/A_norm riêng. Mỗi batch huấn luyện = 1 tile nguyên (~676 spot)
+        # -> SGC chạy ĐÚNG trên ma trận kề 676x676 (láng giềng không gian thật,
+        # không bị cắt như batch ngẫu nhiên 32 spot), VÀ không OOM vì chỉ ~676
+        # patch lên GPU 1 lần (chunk nhỏ bên trong forward). Val = 1 tile (~25%),
+        # train = 3 tile còn lại (~75%) -> tương đương split spot-level 80/20 của
+        # thiết kế cũ nhưng an toàn cho SGC + bộ nhớ.
+        self.tiles = [f'{sample_id}_T{i}' for i in range(4)]
+        cx = np.median(coords[:, 0]); cy = np.median(coords[:, 1])
+        masks = [
+            (coords[:, 0] <= cx) & (coords[:, 1] <= cy),  # T0
+            (coords[:, 0] <= cx) & (coords[:, 1] >  cy),  # T1
+            (coords[:, 0] >  cx) & (coords[:, 1] <= cy),  # T2
+            (coords[:, 0] >  cx) & (coords[:, 1] >  cy),  # T3
+        ]
+        # Đảm bảo mọi spot rơi vào đúng 1 tile (không ai bị rơi ra ngoài do <=/>).
+        assigned = np.zeros(len(coords), dtype=bool)
+        masks = [m & ~assigned for m in masks]
+        for m in masks:
+            assigned |= m
+        # Spot nào chưa được gán (do trùng median hiếm gặp) -> gán vào tile gần nhất
+        if not assigned.all():
+            rem = ~assigned
+            for j in np.where(rem)[0]:
+                dx = coords[j, 0] - cx; dy = coords[j, 1] - cy
+                t = 0 if (dx <= 0 and dy <= 0) else (1 if (dx <= 0 and dy > 0)
+                      else (2 if (dx > 0 and dy <= 0) else 3))
+                masks[t][j] = True
+
+        self.names = list(self.tiles)
+        self.id2name = {i: self.tiles[i] for i in range(4)}
+        self.meta_dict = {t: meta for t in self.tiles}
+        self.lengths = [int(m.sum()) for m in masks]
+        self.cumlen = np.cumsum(self.lengths)
+        # Tile dùng làm validation (cố định để tái lập). 3 tile còn lại = train.
+        self.val_tile = self.tiles[3]
+
+        self.label = {t: torch.full((self.lengths[i],), -1)
+                      for i, t in enumerate(self.tiles)}
+        self.lbl2id = {
+            'invasive cancer': 0, 'breast glands': 1, 'immune infiltrate': 2,
+            'cancer in situ': 3, 'connective tissue': 4, 'adipose tissue': 5, 'undetermined': -1,
+        }
+
+        self.exp_dict = {self.tiles[i]: exp_mat[masks[i]] for i in range(4)}
+        self.center_dict = {self.tiles[i]: coords[masks[i]] for i in range(4)}
+        self.loc_dict = {self.tiles[i]: coords[masks[i]].astype(float) for i in range(4)}
 
         self.transforms = transforms.Compose([
             transforms.ColorJitter(0.5, 0.5, 0.5),
@@ -504,8 +540,11 @@ class LightHGGEP_BRAINST(LightHGGEP_HER2ST):
         self.mean = [0.485, 0.456, 0.406]
         self.std = [0.229, 0.224, 0.225]
 
+        # [HƯỚNG A] Build A_norm RIÊNG cho từng tile (KNN trên tọa độ tile).
+        # KHÔNG dùng _build_graphs của parent (nó tính N từ meta_dict = full 2702).
         self.A_norm_cache = {}
-        self._build_graphs()
+        for i, t in enumerate(self.tiles):
+            self.A_norm_cache[t] = self._build_tile_graph(self.loc_dict[t], self.k)
 
     def get_img_path(self, name):
         # BRAINST khong doc file, anh da nam trong self.hires_img
@@ -565,6 +604,24 @@ class LightHGGEP_BRAINST(LightHGGEP_HER2ST):
         # BRAINST luu anh numpy thay vi PIL; crop truc tiep
         self._load_hires()
         return self.hires_img
+
+    def _build_tile_graph(self, coords, k):
+        """Xay dung A_norm cho 1 tile (KNN tren toa do tile, giong _build_graphs
+        cua parent nhung cho N spot cua tile, tra ve ma tran (N, N))."""
+        N = len(coords)
+        if N < 2:
+            return np.eye(1, dtype=np.float32)
+        D = pairwise_distances(coords, metric='euclidean')
+        k_eff = min(k, N - 1)
+        A = np.zeros((N, N), dtype=np.float32)
+        for i in range(N):
+            order = np.argsort(D[i])
+            order = order[order != i][:k_eff]
+            A[i, order] = 1.0
+        A_tilde = A + np.eye(N, dtype=np.float32)
+        D_hat = np.diag(np.sum(A_tilde, axis=1) ** (-0.5))
+        D_hat[np.isinf(D_hat)] = 0
+        return (D_hat @ A_tilde @ D_hat).astype(np.float32)
 
     def __getitem__(self, index):
         i = 0

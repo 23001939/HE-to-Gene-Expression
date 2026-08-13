@@ -392,27 +392,21 @@ train_dataset = DATASET_CLASS(train=True, fold=FOLD, k_neighbors=K_NEIGHBORS)
 VAL_SECTION = sorted(train_dataset.names)[0]
 print(f"Slide dùng làm validation (tách từ tập train, KHÔNG phải test_dataset): {VAL_SECTION}")
 
-# [BRAIN-ST] dataset chi co 1 section -> khong the exclude ca section lam val.
-# Chia spot-level: 80% train / 20% val (deterministic từ seed) trong chinh section do.
-# VAL_SECTION van duoc in nhu ten section, nhung split la spot-level.
+# [HƯỚNG A] dataset chia 1 section thành 4 tile, mỗi tile = 1 "section" riêng
+# (xem LightHGGEP_BRAINST.__init__). Validation = 1 tile cố định (val_tile,
+# ~25%), train = 3 tile còn lại (~75%). Mỗi batch = NGUYÊN 1 tile (~676 spot)
+# -> SectionBatchSampler chỉ cắt theo BATCH_SIZE, tile nhỏ hơn BATCH_SIZE thì
+# thành đúng 1 batch. SGC chạy ĐÚNG trên ma trận kề tile (676x676), không OOM.
 train_override = None
 val_override = None
 if DATASET == 'brainst':
-    import numpy as _np
-    _rng = _np.random.RandomState(42)
-    _all = list(range(len(train_dataset)))
-    _rng.shuffle(_all)
-    _n_val = max(1, int(0.2 * len(_all)))
-    _val_idx = sorted(_all[:_n_val])
-    _train_idx = sorted(_all[_n_val:])
-    train_override = {VAL_SECTION: _train_idx}
-    val_override = {VAL_SECTION: _val_idx}
-    # [VÁ SGC] feed NGUYÊN section (1 batch = toàn bộ N spot) để SGC chạy đúng
-    # trên A_norm_full (xem models/LightHGGEP.py forward). BATCH_SIZE = N.
-    BATCH_SIZE = len(train_dataset)
-    print(f"[BRAIN-ST] spot-level split: train={len(_train_idx)} val={len(_val_idx)} "
-          f"(trong section {VAL_SECTION})")
-    print(f"[BRAIN-ST] BATCH_SIZE = {BATCH_SIZE} (full section, SGC enabled)")
+    VAL_SECTION = train_dataset.val_tile
+    # batch = full tile: đủ lớn để tile bất kỳ chỉ thành 1 batch, SGC đúng.
+    BATCH_SIZE = max(train_dataset.lengths)
+    _n_train = sum(train_dataset.lengths) - train_dataset.lengths[train_dataset.names.index(VAL_SECTION)]
+    print(f"[BRAIN-ST] tile split: train={_n_train} val={train_dataset.lengths[train_dataset.names.index(VAL_SECTION)]} "
+          f"(val_tile={VAL_SECTION})")
+    print(f"[BRAIN-ST] BATCH_SIZE = {BATCH_SIZE} (full tile, SGC enabled, no OOM)")
 
 DDP_RANK = int(os.environ.get("LOCAL_RANK", 0))
 # Kaggle's parent DDP process can construct the rank-0 loader before it
@@ -420,7 +414,7 @@ DDP_RANK = int(os.environ.get("LOCAL_RANK", 0))
 # receives only its own section shard rather than processing the full dataset.
 DDP_WORLD_SIZE = int(os.environ.get("WORLD_SIZE", N_GPUS))
 train_sampler = SectionBatchSampler(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
-                                     exclude_sections=[VAL_SECTION] if DATASET != 'brainst' else None,
+                                     exclude_sections=[VAL_SECTION],
                                      section_indices_override=train_override,
                                      rank=DDP_RANK,
                                      num_replicas=DDP_WORLD_SIZE, shard_sections=True)
@@ -448,12 +442,15 @@ val_loader = DataLoader(train_dataset, batch_sampler=val_sampler,
                          collate_fn=section_collate_fn, **eval_loader_options)
 
 # Model
+# [HƯỚNG A] cnn_chunk GIỮ NHỎ (không = BATCH_SIZE) để forward luôn chunk input
+# (tránh OOM kể cả khi 1 batch = 676 patch). Chunk KHÔNG ảnh hưởng SGC vì z_spot
+# được ghép lại đủ cả tile trước khi lan truyền.
 model = LightHGGEP(
     n_genes=N_GENES,
     k_neighbors=K_NEIGHBORS,
     learning_rate=LEARNING_RATE,
     max_epochs=MAX_EPOCHS,
-    cnn_chunk=BATCH_SIZE,
+    cnn_chunk=64,
 )
 
 # Set graph cho model
@@ -539,7 +536,7 @@ best_model = LightHGGEP.load_from_checkpoint(
     k_neighbors=K_NEIGHBORS,
     learning_rate=LEARNING_RATE,
     max_epochs=MAX_EPOCHS,
-    cnn_chunk=BATCH_SIZE
+    cnn_chunk=64
 )
 
 # Set graph cho model (cho test set)
