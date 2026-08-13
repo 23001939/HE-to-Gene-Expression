@@ -34,7 +34,7 @@ class LightHGGEP(pl.LightningModule):
     5. Prediction Head: Linear(128 -> n_genes)
     """
     def __init__(self, n_genes=785, k_neighbors=4, learning_rate=1e-4, max_epochs=100,
-                 cnn_chunk=64, use_sgc=True, sgc_nonlinear=True):
+                 cnn_chunk=64, use_sgc=True, sgc_nonlinear=True, sgc_alpha=1.0):
         super().__init__()
         self.save_hyperparameters()
 
@@ -45,6 +45,12 @@ class LightHGGEP(pl.LightningModule):
         self.cnn_chunk = cnn_chunk  # sẽ được set lại ngay dưới nếu bạn truyền vào
         self.use_sgc = use_sgc
         self.sgc_nonlinear = sgc_nonlinear
+        # [TUNE] trong so dong gop cua SGC vao residual. CNN embedding da co san
+        # cau truc khong gian (Moran's I pred~0.83 >> gt~0.23) nen SGC 2-hop
+        # full (alpha=1) lam tron qua da -> PCC tut 0.259->0.189. Giam alpha
+        # (vd 0.3) de SGC chi hieu chinh nhe, giu PCC cao nhung van giu kien
+        # truc SGC cua paper.
+        self.sgc_alpha = sgc_alpha
         # Stage 1: Low-level (nuclei features)
         self.stage1 = nn.Sequential(
             DepthwiseSeparableConv(3, 64, kernel_size=3, padding=1),
@@ -192,12 +198,12 @@ class LightHGGEP(pl.LightningModule):
                 z = A_norm_full @ z                       # hop 1 (propagation)
                 z = self.sgc_act(self.sgc_weight(z))       # Linear + ReLU
                 z = A_norm_full @ z                       # hop 2 (propagation)
-                z_hat = self.sgc_act(z) + z_spot          # ReLU + residual
+                z_hat = z_spot + self.sgc_alpha * self.sgc_act(z)   # residual * alpha
             else:
                 # SGC goc (thuan tuyen): A_norm^2 @ z_spot roi Linear, khong act
                 for _ in range(2):
                     z = A_norm_full @ z
-                z_hat = self.sgc_weight(z) + z_spot
+                z_hat = z_spot + self.sgc_alpha * self.sgc_weight(z)
         else:
             z_hat = z_spot
     

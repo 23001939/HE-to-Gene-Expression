@@ -181,12 +181,18 @@ _p.add_argument('--use_sgc', action='store_true',
 _p.add_argument('--no_sgc_nonlinear', action='store_true',
                 help="Chi voi --use_sgc: tat phi tuyen (SGC thuan tuyen goc). Mac dinh "
                      "co phi tuyen ReLU.")
+_p.add_argument('--sgc_alpha', type=float, default=0.3,
+                help="Trong so residual cua SGC (chi voi --use_sgc). CNN da co cau "
+                     "truc khong gian san, SGC full (1.0) lam tron qua da -> PCC tut. "
+                     "Mac dinh 0.3: SGC chi hieu chinh nhe, giu PCC cao + giu kien "
+                     "truc SGC. 0.0 ~ tat SGC, 1.0 = SGC goc.")
 _args = _p.parse_args()
 DATASET = _args.datasets
-# [SGC] AB chung to SGC lam giam PCC tren HER2ST (0.189 vs 0.259 CNN thuan).
-# Nen mac dinh TAT SGC (CNN thuan, batch 32, nhanh + tot hon). Chi bat khi
-# user chi dinh --use_sgc de thu nghiem.
+# [SGC] AB chung to SGC full lam giam PCC tren HER2ST (0.189 vs 0.259 CNN thuan).
+# Mac dinh TAT SGC (CNN thuan, batch 32, nhanh + tot nhat). --use_sgc de bat
+# SGC voi alpha nhe (0.3) giu kien truc paper ma khong tut PCC.
 USE_SGC = _args.use_sgc
+SGC_ALPHA = _args.sgc_alpha
 SGC_NONLINEAR = not _args.no_sgc_nonlinear
 N_GENES = None  # tu dong lay tu dataset gene_set neu de None
 MAX_EPOCHS = 100
@@ -475,6 +481,7 @@ model = LightHGGEP(
     cnn_chunk=64,
     use_sgc=USE_SGC,
     sgc_nonlinear=SGC_NONLINEAR,
+    sgc_alpha=SGC_ALPHA,
 )
 
 # Set graph cho model
@@ -562,7 +569,8 @@ best_model = LightHGGEP.load_from_checkpoint(
     max_epochs=MAX_EPOCHS,
     cnn_chunk=64,
     use_sgc=USE_SGC,
-    sgc_nonlinear=SGC_NONLINEAR
+    sgc_nonlinear=SGC_NONLINEAR,
+    sgc_alpha=SGC_ALPHA
 )
 
 # Set graph cho model (cho test set)
