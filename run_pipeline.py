@@ -462,9 +462,12 @@ print(f"Light-HGGEP total parameters: {total_params:,}")
 assert total_params < 300000, f"Light-HGGEP should have <300K params, got {total_params:,}"
 
 # Callbacks
+# [BRAIN-ST] val_loss plateau nhanh hon HER2ST -> tang patience de model co
+# thoi gian hoc (train van dang giam du val dung yen). HER2ST giu PATIENCE=15.
+_es_patience = 40 if DATASET == 'brainst' else PATIENCE
 early_stop_callback = EarlyStopping(
     monitor='val_loss',
-    patience=PATIENCE,
+    patience=_es_patience,
     mode='min',
     verbose=True
 )

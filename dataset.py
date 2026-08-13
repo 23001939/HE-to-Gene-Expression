@@ -474,7 +474,8 @@ class LightHGGEP_BRAINST(LightHGGEP_HER2ST):
         #   1) library-size normalize trên TOÀN BỘ matrix (không chỉ 250 gene)
         #   2) log1p
         #   3) chọn Top250 theo variance cao nhất (trên log-normalized full)
-        #   4) z-score theo gene để ổn định scale (PCC không đổi, RMSE có nghĩa)
+        # KHÔNG z-score: target giữ absolute scale (log-count) để model không
+        # collapse về hằng số (dự đoán toàn 0). PCC/Spearman bất biến với shift/scale.
         cnt = self.get_cnt(sample_id)
         full = cnt.values.astype(np.float64)            # (N, n_all_genes)
         lib = full.sum(axis=1, keepdims=True)
@@ -487,12 +488,7 @@ class LightHGGEP_BRAINST(LightHGGEP_HER2ST):
         gene_list = list(cnt.columns[top_idx])
         self.gene_list = gene_list
         self.gene_set = list(gene_list)
-        sub = log[:, top_idx]                            # (N, 250)
-        # z-score theo gene (mean 0, std 1) để pred/gt cùng scale
-        mu = sub.mean(axis=0, keepdims=True)
-        sd = sub.std(axis=0, keepdims=True)
-        sd[sd == 0] = 1.0
-        exp_mat = (sub - mu) / sd
+        exp_mat = log[:, top_idx]                        # (N, 250) log-count, không z-score
         self.exp_dict = {sample_id: exp_mat}
 
         # center: full-res pixel tu obsm['spatial']; loc: chinh center (dung lam input)
