@@ -33,7 +33,8 @@ class LightHGGEP(pl.LightningModule):
     4. Spatial SGC: K-NN graph + D^(-1/2) A D^(-1/2) + 2 layers
     5. Prediction Head: Linear(128 -> n_genes)
     """
-    def __init__(self, n_genes=785, k_neighbors=4, learning_rate=1e-4, max_epochs=100, cnn_chunk=64, use_sgc=True):
+    def __init__(self, n_genes=785, k_neighbors=4, learning_rate=1e-4, max_epochs=100,
+                 cnn_chunk=64, use_sgc=True, sgc_nonlinear=True):
         super().__init__()
         self.save_hyperparameters()
 
@@ -43,6 +44,7 @@ class LightHGGEP(pl.LightningModule):
         self.max_epochs = max_epochs
         self.cnn_chunk = cnn_chunk  # sẽ được set lại ngay dưới nếu bạn truyền vào
         self.use_sgc = use_sgc
+        self.sgc_nonlinear = sgc_nonlinear
         # Stage 1: Low-level (nuclei features)
         self.stage1 = nn.Sequential(
             DepthwiseSeparableConv(3, 64, kernel_size=3, padding=1),
@@ -67,8 +69,13 @@ class LightHGGEP(pl.LightningModule):
         self.cross_scale_fusion = nn.Linear(64 * 3, 128)
         
         # Spatial SGC Weight (Eq. 2)
+        # [PHI TUYEN] goc la SGC thuan tuyen (Linear, khong activation). them
+        # ReLU giua 2 hop de thanh GCN nhe -> co phi tuyen, hoc duoc bien/duc
+        # dac trung khong gian thay vi chi lam tron. Tat bang sgc_nonlinear=False
+        # de quay ve SGC goc.
         self.sgc_weight = nn.Linear(128, 128, bias=False)
-        
+        self.sgc_act = nn.ReLU(inplace=True)
+
         # Prediction Head (Eq. 3)
         self.pred_head = nn.Linear(128, n_genes)
         
@@ -178,14 +185,19 @@ class LightHGGEP(pl.LightningModule):
             # khong phai x.device (se bi CPU -> mat khop device voi z_spot).
             A_norm_full = self.A_norm_cache[section_name].to(dev)
             z = z_spot
-            for _ in range(2):
-                z = A_norm_full @ z
-            # [RESIDUAL] Top250 gen la gen co phuong sai CAO NHAT = IT bang
-            # phang khong gian nhat. SGC^2 trung binh moi spot qua lang gieng
-            # 2-hop -> lam phang variation cua chinh cac gen do -> PCC~0. Giu
-            # residual z_spot de CNN embedding (co variation spot-to-spot) khong
-            # bi xoa; sgc_weight chi hoc phan hieu chinh khong gian.
-            z_hat = self.sgc_weight(z) + z_spot
+            if self.sgc_nonlinear:
+                # [PHI TUYEN] GCN nhe 2-hop: lan truyen -> Linear -> ReLU ->
+                # lan truyen -> ReLU. Co phi tuyen nen hoc duoc bien/duc dac
+                # trung khong gian thay vi chi lam tron. Residual giu z_spot.
+                z = A_norm_full @ z                       # hop 1 (propagation)
+                z = self.sgc_act(self.sgc_weight(z))       # Linear + ReLU
+                z = A_norm_full @ z                       # hop 2 (propagation)
+                z_hat = self.sgc_act(z) + z_spot          # ReLU + residual
+            else:
+                # SGC goc (thuan tuyen): A_norm^2 @ z_spot roi Linear, khong act
+                for _ in range(2):
+                    z = A_norm_full @ z
+                z_hat = self.sgc_weight(z) + z_spot
         else:
             z_hat = z_spot
     

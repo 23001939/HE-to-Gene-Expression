@@ -177,9 +177,13 @@ _p.add_argument('--datasets', choices=['her2st', 'her2st_top250', 'brainst'], de
 _p.add_argument('--no_sgc', action='store_true',
                 help="Tat Spatial SGC (chi dung CNN embedding). Mac dinh BAT SGC. "
                      "Dung flag nay de debug PCC (xac nhan SGC co phang prediction khong).")
+_p.add_argument('--no_sgc_nonlinear', action='store_true',
+                help="Tat phi tuyen cua SGC (quay ve SGC thuan tuyen goc: Linear "
+                     "khong activation). Mac dinh BAT phi tuyen (GCN nhe 2-hop ReLU).")
 _args = _p.parse_args()
 DATASET = _args.datasets
 USE_SGC = not _args.no_sgc
+SGC_NONLINEAR = not _args.no_sgc_nonlinear
 N_GENES = None  # tu dong lay tu dataset gene_set neu de None
 MAX_EPOCHS = 100
 PATIENCE = 15
@@ -456,6 +460,7 @@ model = LightHGGEP(
     max_epochs=MAX_EPOCHS,
     cnn_chunk=64,
     use_sgc=USE_SGC,
+    sgc_nonlinear=SGC_NONLINEAR,
 )
 
 # Set graph cho model
@@ -542,7 +547,8 @@ best_model = LightHGGEP.load_from_checkpoint(
     learning_rate=LEARNING_RATE,
     max_epochs=MAX_EPOCHS,
     cnn_chunk=64,
-    use_sgc=USE_SGC
+    use_sgc=USE_SGC,
+    sgc_nonlinear=SGC_NONLINEAR
 )
 
 # Set graph cho model (cho test set)
