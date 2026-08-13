@@ -130,12 +130,16 @@ class LightHGGEP(pl.LightningModule):
         tại). Spatial SGC (Eq.2) vẫn áp dụng trên ĐỦ N embedding sau khi ghép các chunk lại
         -- nhờ vậy A_norm_full không còn bị cắt mất láng giềng thật như thiết kế batching cũ.
         """
+        # [CHUNK INPUT] x co the rat lon (full section = 2162 patches). Giu x tren
+        # CPU, chi chuyen tung chunk len GPU de tranh OOM. z_spot tich luy tren
+        # GPU (N x 128 nhe).
+        dev = next(self.parameters()).device
         B = x.size(0)
         chunk = getattr(self, "cnn_chunk", 64)
-    
+
         z_spot_chunks = []
         for start in range(0, B, chunk):
-            xb = x[start:start + chunk]
+            xb = x[start:start + chunk].to(dev)   # chunk len GPU
             f1 = self.stage1(xb)
             f1_gap = self.gap(f1).view(xb.size(0), -1)
             f2 = self.stage2(f1)
@@ -146,19 +150,21 @@ class LightHGGEP(pl.LightningModule):
             z_spot_chunks.append(self.cross_scale_fusion(z_b))
         z_spot = torch.cat(z_spot_chunks, dim=0)   # (N, 128) -- ĐỦ cả section, không bị cắt
     
-        # Spatial SGC (Eq. 2) -- logic KHÔNG đổi, chỉ khác input z_spot giờ đủ N
-        if section_name is not None and section_name in self.A_norm_cache:
-            A_norm_full = self.A_norm_cache[section_name]
-            A_norm_full = A_norm_full.to(x.device)
-            if local_indices is not None:
-                if torch.is_tensor(local_indices):
-                    local_indices = local_indices.cpu().numpy()
-                A_norm_batch = A_norm_full[local_indices][:, local_indices]
-            else:
-                A_norm_batch = A_norm_full
+        # Spatial SGC (Eq. 2)
+        # [VÁ BUG] code cũ: A_norm_full[local_indices][:, local_indices] với
+        # local_indices là 1 batch NHỎ NGẪU NHIÊN (32 spot) -> chỉ lấy giao điểm
+        # 32x32 giữa mấy spot ngẫu nhiên -> KHÔNG thấy láng giềng thật -> SGC vô
+        # hiệu (PCC~0). SỬA: SGC chỉ chạy khi feed NGUYÊN section (z_spot.shape[0]
+        # == N), lúc đó dùng A_norm_full NGUYÊN (N x N) lan đúng 2-hop trên đồ
+        # thị KNN không gian thật. Với batch nhỏ (< N) -> skip SGC (trả CNN
+        # embedding) để không crash (vì A_norm_full @ z_spot sai kích thước).
+        # Yêu cầu: 1 forward feed đủ N spot (BATCH_SIZE = N cho BRAIN-ST).
+        if (section_name is not None and section_name in self.A_norm_cache
+                and z_spot.shape[0] == self.A_norm_cache[section_name].shape[0]):
+            A_norm_full = self.A_norm_cache[section_name].to(x.device)
             z = z_spot
             for _ in range(2):
-                z = A_norm_batch @ z
+                z = A_norm_full @ z
             z_hat = self.sgc_weight(z)
         else:
             z_hat = z_spot
@@ -175,6 +181,16 @@ class LightHGGEP(pl.LightningModule):
         self.log('train_mse', loss, on_epoch=True, sync_dist=True)
         self.log('train_pcc', mean_gene_pearson(y_hat, exp), on_epoch=True, sync_dist=True)
         return loss
+
+    def transfer_batch_to_device(self, batch, device, dataloader_idx):
+        # [CHUNK INPUT] Giu patch tren CPU (batch co the la full section = 2162
+        # patches, qua lon de up whole leen GPU). Chi move exp (nhe) len device;
+        # forward se tu chunk patch tu CPU len GPU tung phan.
+        if isinstance(batch, (list, tuple)):
+            patch, pos, exp, sec, lidx = batch
+            return (patch, pos.to(device) if pos is not None else pos,
+                    exp.to(device), sec, lidx.to(device) if lidx is not None else lidx)
+        return super().transfer_batch_to_device(batch, device, dataloader_idx)
     
     def validation_step(self, batch, batch_idx):
         patch_3ch, positions, exp, section_name, local_indices = batch

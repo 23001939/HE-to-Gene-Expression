@@ -407,8 +407,12 @@ if DATASET == 'brainst':
     _train_idx = sorted(_all[_n_val:])
     train_override = {VAL_SECTION: _train_idx}
     val_override = {VAL_SECTION: _val_idx}
+    # [VÁ SGC] feed NGUYÊN section (1 batch = toàn bộ N spot) để SGC chạy đúng
+    # trên A_norm_full (xem models/LightHGGEP.py forward). BATCH_SIZE = N.
+    BATCH_SIZE = len(train_dataset)
     print(f"[BRAIN-ST] spot-level split: train={len(_train_idx)} val={len(_val_idx)} "
           f"(trong section {VAL_SECTION})")
+    print(f"[BRAIN-ST] BATCH_SIZE = {BATCH_SIZE} (full section, SGC enabled)")
 
 DDP_RANK = int(os.environ.get("LOCAL_RANK", 0))
 # Kaggle's parent DDP process can construct the rank-0 loader before it
