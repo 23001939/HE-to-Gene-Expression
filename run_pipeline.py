@@ -409,12 +409,21 @@ train_override = None
 val_override = None
 if DATASET == 'brainst':
     VAL_SECTION = train_dataset.val_tile
-    # batch = full tile: đủ lớn để tile bất kỳ chỉ thành 1 batch, SGC đúng.
-    BATCH_SIZE = max(train_dataset.lengths)
     _n_train = sum(train_dataset.lengths) - train_dataset.lengths[train_dataset.names.index(VAL_SECTION)]
     print(f"[BRAIN-ST] tile split: train={_n_train} val={train_dataset.lengths[train_dataset.names.index(VAL_SECTION)]} "
           f"(val_tile={VAL_SECTION})")
-    print(f"[BRAIN-ST] BATCH_SIZE = {BATCH_SIZE} (full tile, SGC enabled, no OOM)")
+
+# [SGC] de SGC THUC SU chay, moi batch phai = NGUYEN 1 section (z_spot.shape[0]
+# == A_norm.shape[0]). Nen BATCH_SIZE phai >= section dai nhat -> moi section
+# thanh dung 1 batch (SectionBatchSampler cat theo BATCH_SIZE, section nho hon
+# BATCH_SIZE se thanh 1 batch). Ap dung cho MOI dataset bat SGC (her2st lẫn
+# brainst). HER2ST max section = 712 spot ~ tile brainst 697 -> chunk(64)+
+# checkpoint da chung minh khong OOM tren T4. Neu tat SGC (--no_sgc) giu
+# BATCH_SIZE=32 nhanh hon.
+if USE_SGC:
+    BATCH_SIZE = max(train_dataset.lengths)
+    print(f"[SGC] BATCH_SIZE = {BATCH_SIZE} (full section/batch -> SGC enabled, "
+          f"chunk+checkpoint tranh OOM)")
 
 DDP_RANK = int(os.environ.get("LOCAL_RANK", 0))
 # Kaggle's parent DDP process can construct the rank-0 loader before it
