@@ -161,7 +161,10 @@ class LightHGGEP(pl.LightningModule):
         # Yêu cầu: 1 forward feed đủ N spot (BATCH_SIZE = N cho BRAIN-ST).
         if (section_name is not None and section_name in self.A_norm_cache
                 and z_spot.shape[0] == self.A_norm_cache[section_name].shape[0]):
-            A_norm_full = self.A_norm_cache[section_name].to(x.device)
+            # [CHUNK INPUT] x giu tren CPU (patches chunk sau len GPU), nen
+            # x.device = cpu. z_spot dang o GPU (dev) -> A_norm phai len dev,
+            # khong phai x.device (se bi CPU -> mat khop device voi z_spot).
+            A_norm_full = self.A_norm_cache[section_name].to(dev)
             z = z_spot
             for _ in range(2):
                 z = A_norm_full @ z
