@@ -451,8 +451,7 @@ class LightHGGEP_BRAINST(LightHGGEP_HER2ST):
         self.r = 224 // 2
         self.k = k_neighbors
         self.train = train
-        self.gene_list = self._select_gene_list()
-        gene_list = self.gene_list
+        self.gene_list = None  # duoc set trong phan tien xu ly exp ben duoi
 
         print('Loading V1_Adult_Mouse_Brain via scanpy ...')
         self._brain_adata = None
@@ -471,10 +470,29 @@ class LightHGGEP_BRAINST(LightHGGEP_HER2ST):
         # BRAINST khong co label -> tat ca -1
         self.label[sample_id] = torch.full((len(meta),), -1)
 
+        # [CHUẨN 10x / paper] tiền xử lý expression:
+        #   1) library-size normalize trên TOÀN BỘ matrix (không chỉ 250 gene)
+        #   2) log1p
+        #   3) chọn Top250 theo variance cao nhất (trên log-normalized full)
+        #   4) z-score theo gene để ổn định scale (PCC không đổi, RMSE có nghĩa)
         cnt = self.get_cnt(sample_id)
+        full = cnt.values.astype(np.float64)            # (N, n_all_genes)
+        lib = full.sum(axis=1, keepdims=True)
+        lib[lib == 0] = 1.0
+        norm = full / lib * 1e4                          # library-size normalize
+        log = np.log1p(norm)                             # log1p
+        var = log.var(axis=0)
+        top_idx = np.argsort(var)[::-1][:250]            # Top250 variance cao nhất
+        top_idx = np.sort(top_idx)                       # giữ thứ tự cột ổn định
+        gene_list = list(cnt.columns[top_idx])
+        self.gene_list = gene_list
         self.gene_set = list(gene_list)
-        exp_mat = scp.transform.log(
-            scp.normalize.library_size_normalize(cnt[self.gene_set].values))
+        sub = log[:, top_idx]                            # (N, 250)
+        # z-score theo gene (mean 0, std 1) để pred/gt cùng scale
+        mu = sub.mean(axis=0, keepdims=True)
+        sd = sub.std(axis=0, keepdims=True)
+        sd[sd == 0] = 1.0
+        exp_mat = (sub - mu) / sd
         self.exp_dict = {sample_id: exp_mat}
 
         # center: full-res pixel tu obsm['spatial']; loc: chinh center (dung lam input)
@@ -492,20 +510,6 @@ class LightHGGEP_BRAINST(LightHGGEP_HER2ST):
 
         self.A_norm_cache = {}
         self._build_graphs()
-
-    def _select_gene_list(self):
-        # Top 250 gen co mean bieu hien cao nhat tren count matrix (1 section)
-        cnt = self.get_cnt(self.sample_id)
-        gene_means = cnt.mean(axis=0)
-        top = gene_means.sort_values(ascending=False).index[:250].tolist()
-        # dam bao dung 250, khong trung lap
-        seen = []
-        for g in top:
-            if g not in seen:
-                seen.append(g)
-            if len(seen) == 250:
-                break
-        return seen
 
     def get_img_path(self, name):
         # BRAINST khong doc file, anh da nam trong self.hires_img
