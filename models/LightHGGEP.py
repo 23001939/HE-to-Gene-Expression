@@ -137,9 +137,7 @@ class LightHGGEP(pl.LightningModule):
         B = x.size(0)
         chunk = getattr(self, "cnn_chunk", 64)
 
-        z_spot_chunks = []
-        for start in range(0, B, chunk):
-            xb = x[start:start + chunk].to(dev)   # chunk len GPU
+        def _cnn_chunk_forward(xb):
             f1 = self.stage1(xb)
             f1_gap = self.gap(f1).view(xb.size(0), -1)
             f2 = self.stage2(f1)
@@ -147,7 +145,19 @@ class LightHGGEP(pl.LightningModule):
             f3 = self.stage3(f2)
             f3_gap = self.gap(f3).view(xb.size(0), -1)
             z_b = torch.cat([f1_gap, f2_gap, f3_gap], dim=1)
-            z_spot_chunks.append(self.cross_scale_fusion(z_b))
+            return self.cross_scale_fusion(z_b)
+
+        # [CHECKPOINT] batch=697 (1 tile) -> toan bo activation graph cua 697
+        # patch bi giu song cung luc (den khi cat z_spot) ~11.6GB -> OOM. Dung
+        # gradient checkpoint tung chunk: chi giu output fusion (re nhe), activation
+        # duoc tinh lai o backward. Peak chi con 1 chunk ~1.1GB. Van co gradient
+        # ve CNN binh thuong.
+        z_spot_chunks = []
+        for start in range(0, B, chunk):
+            xb = x[start:start + chunk].to(dev)   # chunk len GPU
+            z_b = torch.utils.checkpoint.checkpoint(
+                _cnn_chunk_forward, xb, use_reentrant=False)
+            z_spot_chunks.append(z_b)
         z_spot = torch.cat(z_spot_chunks, dim=0)   # (N, 128) -- ĐỦ cả section, không bị cắt
     
         # Spatial SGC (Eq. 2)
