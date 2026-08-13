@@ -33,15 +33,16 @@ class LightHGGEP(pl.LightningModule):
     4. Spatial SGC: K-NN graph + D^(-1/2) A D^(-1/2) + 2 layers
     5. Prediction Head: Linear(128 -> n_genes)
     """
-    def __init__(self, n_genes=785, k_neighbors=4, learning_rate=1e-4, max_epochs=100, cnn_chunk=64):
+    def __init__(self, n_genes=785, k_neighbors=4, learning_rate=1e-4, max_epochs=100, cnn_chunk=64, use_sgc=True):
         super().__init__()
         self.save_hyperparameters()
-        
+
         self.n_genes = n_genes
         self.k_neighbors = k_neighbors
         self.learning_rate = learning_rate
         self.max_epochs = max_epochs
         self.cnn_chunk = cnn_chunk  # sẽ được set lại ngay dưới nếu bạn truyền vào
+        self.use_sgc = use_sgc
         # Stage 1: Low-level (nuclei features)
         self.stage1 = nn.Sequential(
             DepthwiseSeparableConv(3, 64, kernel_size=3, padding=1),
@@ -169,7 +170,8 @@ class LightHGGEP(pl.LightningModule):
         # thị KNN không gian thật. Với batch nhỏ (< N) -> skip SGC (trả CNN
         # embedding) để không crash (vì A_norm_full @ z_spot sai kích thước).
         # Yêu cầu: 1 forward feed đủ N spot (BATCH_SIZE = N cho BRAIN-ST).
-        if (section_name is not None and section_name in self.A_norm_cache
+        if (self.use_sgc and section_name is not None
+                and section_name in self.A_norm_cache
                 and z_spot.shape[0] == self.A_norm_cache[section_name].shape[0]):
             # [CHUNK INPUT] x giu tren CPU (patches chunk sau len GPU), nen
             # x.device = cpu. z_spot dang o GPU (dev) -> A_norm phai len dev,
@@ -178,7 +180,12 @@ class LightHGGEP(pl.LightningModule):
             z = z_spot
             for _ in range(2):
                 z = A_norm_full @ z
-            z_hat = self.sgc_weight(z)
+            # [RESIDUAL] Top250 gen la gen co phuong sai CAO NHAT = IT bang
+            # phang khong gian nhat. SGC^2 trung binh moi spot qua lang gieng
+            # 2-hop -> lam phang variation cua chinh cac gen do -> PCC~0. Giu
+            # residual z_spot de CNN embedding (co variation spot-to-spot) khong
+            # bi xoa; sgc_weight chi hoc phan hieu chinh khong gian.
+            z_hat = self.sgc_weight(z) + z_spot
         else:
             z_hat = z_spot
     

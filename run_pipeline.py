@@ -174,8 +174,12 @@ FOLD = 5
 _p = argparse.ArgumentParser()
 _p.add_argument('--datasets', choices=['her2st', 'her2st_top250', 'brainst'], default='her2st',
                 help="Dataset dung cho training/eval (mac dinh: her2st)")
+_p.add_argument('--no_sgc', action='store_true',
+                help="Tat Spatial SGC (chi dung CNN embedding). Mac dinh BAT SGC. "
+                     "Dung flag nay de debug PCC (xac nhan SGC co phang prediction khong).")
 _args = _p.parse_args()
 DATASET = _args.datasets
+USE_SGC = not _args.no_sgc
 N_GENES = None  # tu dong lay tu dataset gene_set neu de None
 MAX_EPOCHS = 100
 PATIENCE = 15
@@ -419,7 +423,7 @@ train_sampler = SectionBatchSampler(train_dataset, batch_size=BATCH_SIZE, shuffl
                                      rank=DDP_RANK,
                                      num_replicas=DDP_WORLD_SIZE, shard_sections=True)
 val_sampler = SectionBatchSampler(train_dataset, batch_size=BATCH_SIZE, shuffle=False,
-                                   include_sections=[VAL_SECTION] if DATASET != 'brainst' else None,
+                                   include_sections=[VAL_SECTION],
                                    section_indices_override=val_override,
                                    rank=DDP_RANK,
                                    num_replicas=DDP_WORLD_SIZE, shard_sections=False)
@@ -451,6 +455,7 @@ model = LightHGGEP(
     learning_rate=LEARNING_RATE,
     max_epochs=MAX_EPOCHS,
     cnn_chunk=64,
+    use_sgc=USE_SGC,
 )
 
 # Set graph cho model
@@ -536,7 +541,8 @@ best_model = LightHGGEP.load_from_checkpoint(
     k_neighbors=K_NEIGHBORS,
     learning_rate=LEARNING_RATE,
     max_epochs=MAX_EPOCHS,
-    cnn_chunk=64
+    cnn_chunk=64,
+    use_sgc=USE_SGC
 )
 
 # Set graph cho model (cho test set)
