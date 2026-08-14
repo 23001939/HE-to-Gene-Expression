@@ -60,7 +60,9 @@ import glob
 import shutil
 
 if not os.path.isdir("data/her2st/.git"):
-    subprocess.run("git clone https://github.com/almaan/her2st.git", shell=True, cwd="data")
+    # [SỬA đầy ổ đĩa] shallow clone (--depth 1) để .git không tốn ~1GB như full clone;
+    # chỉ cần file data, không cần lịch sử.
+    subprocess.run("git clone --depth 1 https://github.com/almaan/her2st.git", shell=True, cwd="data")
 else:
     print("data/her2st da ton tai, bo qua clone.")
 
@@ -323,10 +325,12 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
         checkpoint_cb = ModelCheckpoint(
             dirpath=ckpt_out_dir,
             filename=f"{mode}_fold{fold}_" + "{epoch:02d}",
-            save_top_k=3,
+            # [SỬA đầy ổ đĩa] chỉ giữ 1 best + không save_last để tiết kiệm dung lượng;
+            # nhiều fold × save_top_k=3 + last trên Kaggle dễ tràn /kaggle (Errno 28).
+            save_top_k=1,
             monitor=monitor,
             mode="min",
-            save_last=True,
+            save_last=False,
         )
         early_stop_cb = EarlyStopping(
             monitor=monitor,
@@ -568,6 +572,12 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
         summary = new_row
     summary.to_csv(summary_csv, index=False)
     print(f"  Saved summary → {summary_csv}")
+
+    # [SỬA đầy ổ đĩa] Xóa toàn bộ ckpt của model này sau khi fold xong (best đã load
+    # vào m rồi, không cần giữ). Giải phóng dung lượng cho fold tiếp theo trên Kaggle.
+    if os.path.isdir(ckpt_out_dir):
+        shutil.rmtree(ckpt_out_dir, ignore_errors=True)
+        print(f"  [space] removed {ckpt_out_dir} to free disk for next fold")
 
     if n_gpus > 1 and not skip_train:
         trainer.strategy.barrier()

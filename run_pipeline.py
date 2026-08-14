@@ -109,8 +109,9 @@ if not os.path.isdir("data/her2st/.git"):
     # [SỬA lỗi #7] Dùng tham số cwd thay vì "cd data && ..." -- lệnh cd trong subprocess
     # shell=True chạy trong tiến trình con riêng nên không ảnh hưởng thư mục làm việc
     # của Python; dùng cwd= là cách đúng và nhất quán trên cả Linux lẫn Windows.
+    # [SỬA đầy ổ đĩa] shallow clone --depth 1 để .git không tốn ~1GB như full clone.
     # [DỊCH TỪ IPYTHON] gốc: !cd data && git clone https://github.com/almaan/her2st.git
-    subprocess.run("git clone https://github.com/almaan/her2st.git", shell=True, cwd="data")
+    subprocess.run("git clone --depth 1 https://github.com/almaan/her2st.git", shell=True, cwd="data")
 else:
     print("data/her2st da ton tai, bo qua clone.")
 
@@ -449,10 +450,11 @@ def run_fold(fold):
     checkpoint_callback = ModelCheckpoint(
         dirpath=CKPT_DIR,
         filename='lighthggep_fold' + str(FOLD) + '_{epoch:02d}_{val_loss:.4f}',
-        save_top_k=3,
+        # [SỬA đầy ổ đĩa] chỉ giữ 1 best + không save_last để tiết dung lượng Kaggle.
+        save_top_k=1,
         monitor='val_loss',
         mode='min',
-        save_last=True
+        save_last=False
     )
 
     # [MỚI] Logger riêng từng fold để không đè lên nhau.
@@ -701,6 +703,13 @@ def run_fold(fold):
     del model, best_model, train_dataset, test_dataset, train_loader, val_loader, test_loader
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+    # [SỬA đầy ổ đĩa] Xóa toàn bộ checkpoint đã sinh trong fold này (best đã load vào
+    # best_model xong). Giải phóng dung lượng cho fold tiếp theo trên Kaggle.
+    if os.path.isdir(CKPT_DIR):
+        shutil.rmtree(CKPT_DIR, ignore_errors=True)
+        os.makedirs(CKPT_DIR, exist_ok=True)
+        print(f"  [space] removed {CKPT_DIR} to free disk for next fold")
 
     return row
 
