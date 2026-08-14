@@ -1,5 +1,4 @@
 """
-
 run_pipeline.py -- Toàn bộ pipeline train/predict/eval/visualize Light-HGGEP trên HER2ST.
 
 File này được TÁCH RA NGUYÊN VẸN từ các cell code của LightHGGEP.ipynb (PHẦN 1, 2, 4, 5,
@@ -11,7 +10,14 @@ cú pháp Python hợp lệ trong file .py) được dịch sang subprocess.run(
 CÙNG một câu lệnh shell, cùng hành vi, không đổi logic. Mỗi vị trí dịch đều có comment
 "[DỊCH TỪ IPYTHON]" đánh dấu, kèm câu lệnh gốc để đối chiếu.
 
-Cách chạy: xem notebook mỏng đi kèm (chỉ gồm !pip install + !python run_pipeline.py).
+CÁCH CHẠY (đã mở rộng cho k-fold CV):
+  - Mặc định chạy 5-fold LOOCV (fold 0..4) -- test section = samples[fold] trong
+    names[1:33] của dataset.
+  - --fold-start / --fold-end: chạy 1 lát cắt (exclusive) -- ví dụ
+    `--fold-start 0 --fold-end 2` chỉ chạy fold 0 và 1. Đổi --fold-end=32 để full 32-fold.
+  - --datasets: 'her2st' (785 gen) hoặc 'her2st_top250' (250 gen).
+  Kết quả TẤT CẢ fold được gộp vào Light-HGGEP_results.csv (1 dòng / fold) và in ra màn hình
+  cả từng fold lẫn bảng tổng hợp.
 """
 import subprocess  # [MỚI - chỉ để dịch các dòng "!..." của notebook, xem docstring trên]
 
@@ -27,6 +33,7 @@ import time
 import numpy as np
 import torch
 import warnings
+import pandas as pd  # [MỚI - cần cho bảng tổng hợp kết quả 32-fold]
 warnings.filterwarnings('ignore')
 
 def set_seed(seed=42):
@@ -53,6 +60,8 @@ print("GPUs used for Light-HGGEP:", N_GPUS)
 # ============================================================
 USE_WANDB = False  # doi thanh True neu ban muon dung W&B cua rieng minh
 
+# [MỚI] Logger được tạo RIÊNG trong mỗi fold (tên kèm fold) để không đè lên nhau.
+# W&B giữ nguyên logic gốc nếu bật.
 wandb_logger = None
 if USE_WANDB:
     import wandb
@@ -62,20 +71,16 @@ if USE_WANDB:
         wandb_key = user_secrets.get_secret("WANDB_API_KEY")
         wandb.login(key=wandb_key)
         from pytorch_lightning.loggers import WandbLogger
-        wandb_logger = WandbLogger(project="ST-her2st-kaggle", name="lighthggep")
         print("Da bat W&B logging.")
     except Exception as e:
         print("Khong the bat W&B (thieu secret WANDB_API_KEY?), tiep tuc voi CSVLogger.", e)
         USE_WANDB = False
 
 from pytorch_lightning.loggers import CSVLogger
-default_logger = wandb_logger if (USE_WANDB and wandb_logger is not None) else CSVLogger("logs", name="lighthggep")
-print("Logger:", default_logger)
 
 # ============================================================================
 # ---- Cell 6 (notebook gốc) ----
 # ============================================================================
-import os
 import pathlib
 
 # [SỬA lỗi #6] WORKDIR luôn = thư mục chứa file này (repo root) -- đúng trên mọi môi
@@ -135,7 +140,7 @@ import glob
 import shutil
 
 def restore_dir_from_input(dirname):
-    matches = glob.glob(f"/kaggle/input/*/{dirname}") 
+    matches = glob.glob(f"/kaggle/input/*/{dirname}")
     if matches:
         src = matches[0]
         dst = os.path.join(WORKDIR, dirname)
@@ -150,30 +155,19 @@ for d in ["model_ckpts"]:
         print(f"Khong tim thay {d} trong /kaggle/input (binh thuong neu day la lan chay dau tien).")
 
 # ============================================================================
-# ---- Cell 17 (notebook gốc) ----
-# ============================================================================
-# Tao file __init__.py
-# with open("models/__init__.py", "w") as f:
-#     f.write("from .LightHGGEP import LightHGGEP\n")
-
-# import sys
-# if WORKDIR not in sys.path:
-#     sys.path.insert(0, WORKDIR)
-
-# print("Da ghi xong toan bo module. Cau truc thu muc hien tai:")
-# subprocess.run('''find . -maxdepth 2 -name "*.py" | sort''', shell=True)  # [DỊCH TỪ IPYTHON] gốc: !find . -maxdepth 2 -name "*.py" | sort
-
-# ============================================================================
-# ---- Cell 19 (notebook gốc) ----
+# ---- Cell 19 (notebook gốc, MỞ RỘNG: FOLD -> FOLDS range) ----
 # ============================================================================
 import argparse
 
-FOLD = 5
 # Chon dataset qua CLI: 'her2st' (785 gen her_hvg_cut_1000) hoac 'her2st_top250'
 # (250 gen co muc bieu hien trung binh cao nhat, chon tu count matrix truoc LOOCV split).
 _p = argparse.ArgumentParser()
 _p.add_argument('--datasets', choices=['her2st', 'her2st_top250'], default='her2st',
                 help="Dataset dung cho training/eval (mac dinh: her2st)")
+_p.add_argument('--fold-start', type=int, default=0,
+                help="Fold dau tien (inclusive). Mac dinh 0.")
+_p.add_argument('--fold-end', type=int, default=5,
+                help="Fold cuoi (exclusive). Mac dinh 5 = 5-fold LOOCV (fold 0..4).")
 _args = _p.parse_args()
 DATASET = _args.datasets
 N_GENES = None  # tu dong lay tu dataset gene_set neu de None
@@ -187,8 +181,11 @@ NUM_WORKERS = 2  # per DDP rank (4 loader workers total with 2 GPUs)
 CKPT_DIR = "model_ckpts"
 os.makedirs(CKPT_DIR, exist_ok=True)
 
+# [MỚI] Lát cắt fold chạy trong lần gọi này. Dataset dùng names[1:33] => đúng 32 fold.
+FOLDS = range(_args.fold_start, _args.fold_end)
+
 print(f"Configuration:")
-print(f"  FOLD = {FOLD}")
+print(f"  FOLDS = {list(FOLDS)} (mac dinh 5-fold, --fold-end=32 de full 32-fold)")
 print(f"  DATASET = {DATASET}")
 print(f"  N_GENES = {N_GENES}")
 print(f"  MAX_EPOCHS = {MAX_EPOCHS}")
@@ -218,7 +215,6 @@ print(f"  NUM_WORKERS = {NUM_WORKERS} per DDP rank")
 # CHUOI DUY NHAT thay vi list. Vi Model doc dung 1 chuoi section_name tu batch (khong doi
 # forward()/training_step()/validation_step()/test_step()), day la cach va dung o dung lop
 # DataLoader, khong dung vao logic model/dataset.
-import random
 import math
 from torch.utils.data import Sampler
 
@@ -243,7 +239,7 @@ class SectionBatchSampler(Sampler):
         if exclude_sections is not None:
             self.section_indices = {k: v for k, v in self.section_indices.items()
                                      if k not in set(exclude_sections)}
-        
+
         # A rank owns complete sections: spatial graphs are never split across
         # GPUs.  Greedy bin-packing balances *batch counts*, not merely section
         # counts, because HER2ST sections have very different spot counts.
@@ -314,7 +310,7 @@ class SimpleProgressBar(Callback):
         lr = opt.param_groups[0]['lr']
         elapsed = time.perf_counter() - getattr(self, 'epoch_started_at', time.perf_counter())
         remaining = max(total_epochs - (current_epoch + 1), 0) * elapsed
-        
+
         # In đúng format bạn muốn
         print(f"[ep {current_epoch + 1}/{total_epochs}] "
               f"train_mse={train_mse:.4f} train_pcc={train_pcc:.4f} "
@@ -354,358 +350,386 @@ print("Đã định nghĩa SectionBatchSampler / section_collate_fn (vá lỗi b
 
 
 # ============================================================================
-# ---- Cell 25 (notebook gốc) ----
+# ---- Imports chung (notebook gốc Cell 25/27) -- 1 lần, ngoài loop ----
 # ============================================================================
 from dataset import LightHGGEP_HER2ST, LightHGGEP_HER2ST_Top250
 from models.LightHGGEP import LightHGGEP
 from torch.utils.data import DataLoader
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 import pytorch_lightning as pl
+import scanpy as sc
+import matplotlib.pyplot as plt
+
 
 # Chon class dataset theo DATASET
 DATASET_CLASS = LightHGGEP_HER2ST if DATASET == 'her2st' else LightHGGEP_HER2ST_Top250
+# N_GENES lay 1 lan (bo gen giong nhau moi fold; base=785 tu file, top250=250 tu count).
 if N_GENES is None:
-    N_GENES = len(DATASET_CLASS(train=True, fold=FOLD, k_neighbors=K_NEIGHBORS).gene_set)
+    N_GENES = len(DATASET_CLASS(train=True, fold=0, k_neighbors=K_NEIGHBORS).gene_set)
     print(f"  N_GENES auto = {N_GENES}")
 
-# Dataset
-train_dataset = DATASET_CLASS(train=True, fold=FOLD, k_neighbors=K_NEIGHBORS)
-# [SỬA - vá lỗi 1+2] Tách 1 slide CỐ ĐỊNH trong 31 slide train làm validation (KHÔNG
-# đụng test_dataset -- giữ đúng nguyên tắc LOOCV: test chỉ dùng 1 lần duy nhất lúc
-# đánh giá cuối, xem PHẦN 6). Chọn theo alphabet cho tái lập được, có thể đổi thủ công
-# nếu muốn slide khác.
-VAL_SECTION = sorted(train_dataset.names)[0]
-print(f"Slide dùng làm validation (tách từ tập train, KHÔNG phải test_dataset): {VAL_SECTION}")
 
-DDP_RANK = int(os.environ.get("LOCAL_RANK", 0))
-# Kaggle's parent DDP process can construct the rank-0 loader before it
-# exports WORLD_SIZE.  Fall back to the configured device count so rank 0 also
-# receives only its own section shard rather than processing the full dataset.
-DDP_WORLD_SIZE = int(os.environ.get("WORLD_SIZE", N_GPUS))
-train_sampler = SectionBatchSampler(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
-                                     exclude_sections=[VAL_SECTION], rank=DDP_RANK,
-                                     num_replicas=DDP_WORLD_SIZE, shard_sections=True)
-val_sampler = SectionBatchSampler(train_dataset, batch_size=BATCH_SIZE, shuffle=False,
-                                   include_sections=[VAL_SECTION], rank=DDP_RANK,
-                                   num_replicas=DDP_WORLD_SIZE, shard_sections=False)
-print(f"DDP data shard: rank {DDP_RANK}/{DDP_WORLD_SIZE}; "
-      f"train sections={len(train_sampler.section_names)}, "
-      f"train batches={len(train_sampler)}", flush=True)
-loader_options = dict(num_workers=NUM_WORKERS,
-                      pin_memory=torch.cuda.is_available(),
-                      persistent_workers=NUM_WORKERS > 0,
-                      timeout=180)
-eval_loader_options = dict(num_workers=NUM_WORKERS,
-                           pin_memory=torch.cuda.is_available(),
-                           # Avoid keeping train and validation worker caches
-                           # alive simultaneously on every DDP rank.
-                           persistent_workers=False,
-                           timeout=180)
-train_loader = DataLoader(train_dataset, batch_sampler=train_sampler,
-                           collate_fn=section_collate_fn, **loader_options)
-val_loader = DataLoader(train_dataset, batch_sampler=val_sampler,
-                         collate_fn=section_collate_fn, **eval_loader_options)
+# ============================================================================
+# ---- [MỚI] Hàm chạy 1 fold (LOOCV) -- train + eval + figure + results row ----
+# ============================================================================
+def run_fold(fold):
+    import scanpy as sc  # dam bao co san trong scope
+    FOLD = fold
 
-# Model
-model = LightHGGEP(
-    n_genes=N_GENES,
-    k_neighbors=K_NEIGHBORS,
-    learning_rate=LEARNING_RATE,
-    max_epochs=MAX_EPOCHS,
-    cnn_chunk=BATCH_SIZE,
-)
+    # ----- Cell 25 (notebook gốc): build dataset / loader / model / trainer -----
+    train_dataset = DATASET_CLASS(train=True, fold=FOLD, k_neighbors=K_NEIGHBORS)
+    # [SỬA - vá lỗi 1+2] Tách 1 slide CỐ ĐỊNH trong 31 slide train làm validation (KHÔNG
+    # đụng test_dataset -- giữ đúng nguyên tắc LOOCV: test chỉ dùng 1 lần duy nhất lúc
+    # đánh giá cuối, xem PHẦN 6). Chọn theo alphabet cho tái lập được, có thể đổi thủ công
+    # nếu muốn slide khác.
+    VAL_SECTION = sorted(train_dataset.names)[0]
+    # test section cho fold nay = samples[fold], giong logic dataset (names[1:33][fold]).
+    _all = sorted(os.listdir('data/her2st/data/ST-cnts'))
+    _all = [n[:2] for n in _all]
+    _samples = _all[1:33]
+    TEST_SECTION = _samples[FOLD]
+    print(f"\n{'='*72}\nFOLD {FOLD} | TEST_SECTION={TEST_SECTION} | "
+          f"VAL_SECTION={VAL_SECTION} | train_sections={len(train_dataset.names)}\n{'='*72}")
 
-# Set graph cho model
-for section, A_norm in train_dataset.A_norm_cache.items():
-    model.set_graph(section, torch.from_numpy(A_norm).float())
+    DDP_RANK = int(os.environ.get("LOCAL_RANK", 0))
+    # Kaggle's parent DDP process can construct the rank-0 loader before it
+    # exports WORLD_SIZE.  Fall back to the configured device count so rank 0 also
+    # receives only its own section shard rather than processing the full dataset.
+    DDP_WORLD_SIZE = int(os.environ.get("WORLD_SIZE", N_GPUS))
+    train_sampler = SectionBatchSampler(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
+                                         exclude_sections=[VAL_SECTION], rank=DDP_RANK,
+                                         num_replicas=DDP_WORLD_SIZE, shard_sections=True)
+    val_sampler = SectionBatchSampler(train_dataset, batch_size=BATCH_SIZE, shuffle=False,
+                                       include_sections=[VAL_SECTION], rank=DDP_RANK,
+                                       num_replicas=DDP_WORLD_SIZE, shard_sections=False)
+    print(f"DDP data shard: rank {DDP_RANK}/{DDP_WORLD_SIZE}; "
+          f"train sections={len(train_sampler.section_names)}, "
+          f"train batches={len(train_sampler)}", flush=True)
+    loader_options = dict(num_workers=NUM_WORKERS,
+                          pin_memory=torch.cuda.is_available(),
+                          persistent_workers=NUM_WORKERS > 0,
+                          timeout=180)
+    eval_loader_options = dict(num_workers=NUM_WORKERS,
+                               pin_memory=torch.cuda.is_available(),
+                               # Avoid keeping train and validation worker caches
+                               # alive simultaneously on every DDP rank.
+                               persistent_workers=False,
+                               timeout=180)
+    train_loader = DataLoader(train_dataset, batch_sampler=train_sampler,
+                              collate_fn=section_collate_fn, **loader_options)
+    val_loader = DataLoader(train_dataset, batch_sampler=val_sampler,
+                            collate_fn=section_collate_fn, **eval_loader_options)
 
-# Tinh so tham so
-total_params = sum(p.numel() for p in model.parameters())
-print(f"Light-HGGEP total parameters: {total_params:,}")
-assert total_params < 300000, f"Light-HGGEP should have <300K params, got {total_params:,}"
+    # Model
+    model = LightHGGEP(
+        n_genes=N_GENES,
+        k_neighbors=K_NEIGHBORS,
+        learning_rate=LEARNING_RATE,
+        max_epochs=MAX_EPOCHS,
+        cnn_chunk=BATCH_SIZE,
+    )
 
-# Callbacks
-early_stop_callback = EarlyStopping(
-    monitor='val_loss',
-    patience=PATIENCE,
-    mode='min',
-    verbose=True
-)
+    # Set graph cho model
+    for section, A_norm in train_dataset.A_norm_cache.items():
+        model.set_graph(section, torch.from_numpy(A_norm).float())
 
-checkpoint_callback = ModelCheckpoint(
-    dirpath=CKPT_DIR,
-    filename='lighthggep_fold' + str(FOLD) + '_{epoch:02d}_{val_loss:.4f}',
-    save_top_k=3,
-    monitor='val_loss',
-    mode='min',
-    save_last=True
-)
+    # Tinh so tham so
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Light-HGGEP total parameters: {total_params:,}")
+    assert total_params < 300000, f"Light-HGGEP should have <300K params, got {total_params:,}"
 
-# Trainer
-trainer = pl.Trainer(
-    accelerator='gpu' if torch.cuda.is_available() else 'cpu',
-    devices=N_GPUS,
-    # LightHGGEP uses every parameter in its forward loss path; plain DDP avoids
-    # the unnecessary autograd traversal warned about by find_unused_parameters.
-    strategy='ddp' if N_GPUS > 1 else 'auto',
-    # SectionBatchSampler shards whole spatial sections itself.
-    use_distributed_sampler=False,
-    max_epochs=MAX_EPOCHS,
-    callbacks=[early_stop_callback, checkpoint_callback, SimpleProgressBar()],
-    logger=default_logger,
-    log_every_n_steps=10,
-    gradient_clip_val=1.0,
-    precision='16-mixed' if torch.cuda.is_available() else '32-true',
-    enable_progress_bar=False,
-    enable_model_summary=False,     # Tắt bảng tóm tắt model
-)
+    # Callbacks
+    early_stop_callback = EarlyStopping(
+        monitor='val_loss',
+        patience=PATIENCE,
+        mode='min',
+        verbose=True
+    )
 
-# Train
-trainer.fit(model, train_loader, val_loader)
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=CKPT_DIR,
+        filename='lighthggep_fold' + str(FOLD) + '_{epoch:02d}_{val_loss:.4f}',
+        save_top_k=3,
+        monitor='val_loss',
+        mode='min',
+        save_last=True
+    )
 
-# Only rank zero performs the single canonical test evaluation and writes files.
-trainer.strategy.barrier()
-if not trainer.is_global_zero:
+    # [MỚI] Logger riêng từng fold để không đè lên nhau.
+    if USE_WANDB and wandb_logger is not None:
+        logger = wandb_logger
+    else:
+        logger = CSVLogger("logs", name=f"lighthggep_fold{FOLD}")
+
+    # Trainer
+    trainer = pl.Trainer(
+        accelerator='gpu' if torch.cuda.is_available() else 'cpu',
+        devices=N_GPUS,
+        # LightHGGEP uses every parameter in its forward loss path; plain DDP avoids
+        # the unnecessary autograd traversal warned about by find_unused_parameters.
+        strategy='ddp' if N_GPUS > 1 else 'auto',
+        # SectionBatchSampler shards whole spatial sections itself.
+        use_distributed_sampler=False,
+        max_epochs=MAX_EPOCHS,
+        callbacks=[early_stop_callback, checkpoint_callback, SimpleProgressBar()],
+        logger=logger,
+        log_every_n_steps=10,
+        gradient_clip_val=1.0,
+        precision='16-mixed' if torch.cuda.is_available() else '32-true',
+        enable_progress_bar=False,
+        enable_model_summary=False,     # Tắt bảng tóm tắt model
+    )
+
+    # Train
+    trainer.fit(model, train_loader, val_loader)
+
+    # Only rank zero performs the single canonical test evaluation and writes files.
     trainer.strategy.barrier()
-    raise SystemExit(0)
+    if not trainer.is_global_zero:
+        trainer.strategy.barrier()
+        raise SystemExit(0)
 
-# Load best checkpoint
-best_ckpt_path = checkpoint_callback.best_model_path
-print(f"\nBest checkpoint: {best_ckpt_path}")
-print(f"Best validation loss: {checkpoint_callback.best_model_score:.4f}")
+    # Load best checkpoint
+    best_ckpt_path = checkpoint_callback.best_model_path
+    print(f"\nBest checkpoint: {best_ckpt_path}")
+    print(f"Best validation loss: {checkpoint_callback.best_model_score:.4f}")
 
+    # ----- Cell 27 (notebook gốc): predict + evaluate -----
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# ============================================================================
-# ---- Cell 27 (notebook gốc) ----
-# ============================================================================
-from predict import lighthggep_predict
-from evaluation import PROTOCOL_NAME, evaluate_her2st_predictions
-import scanpy as sc
-import numpy as np
-import torch
-import pandas as pd
-import matplotlib.pyplot as plt
+    # Load best model
+    best_model = LightHGGEP.load_from_checkpoint(
+        best_ckpt_path,
+        n_genes=N_GENES,
+        k_neighbors=K_NEIGHBORS,
+        learning_rate=LEARNING_RATE,
+        max_epochs=MAX_EPOCHS,
+        cnn_chunk=BATCH_SIZE
+    )
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # Set graph cho model (cho test set)
+    test_dataset = DATASET_CLASS(train=False, fold=FOLD, k_neighbors=K_NEIGHBORS)
+    for section, A_norm in test_dataset.A_norm_cache.items():
+        best_model.set_graph(section, torch.from_numpy(A_norm).float())
 
-# Load best model
-best_model = LightHGGEP.load_from_checkpoint(
-    best_ckpt_path,
-    n_genes=N_GENES,
-    k_neighbors=K_NEIGHBORS,
-    learning_rate=LEARNING_RATE,
-    max_epochs=MAX_EPOCHS,
-    cnn_chunk=BATCH_SIZE
-)
+    # [SỬA lỗi #4] test_loader phải đưa TOÀN BỘ spot của 1 section vào cùng 1 batch (hoặc
+    # ít nhất các batch đủ lớn từ cùng 1 section) để Spatial SGC có thể lấy đúng
+    # A_norm_full[local_indices][:, local_indices] với đầy đủ thông tin lân cận.
+    # Dùng batch_size=1 trước đây → A_norm_batch = (1×1) → SGC không thấy láng giềng nào,
+    # hoàn toàn vô nghĩa về mặt không gian.
+    # SectionBatchSampler với shuffle=False đảm bảo mỗi batch CHỈ chứa 1 section và
+    # duyệt tuần tự, phù hợp cho inference.
+    test_sampler = SectionBatchSampler(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_sampler=test_sampler,
+                             collate_fn=section_collate_fn, **eval_loader_options)
 
-# Set graph cho model (cho test set)
-test_dataset = DATASET_CLASS(train=False, fold=FOLD, k_neighbors=K_NEIGHBORS)
-for section, A_norm in test_dataset.A_norm_cache.items():
-    best_model.set_graph(section, torch.from_numpy(A_norm).float())
+    # Predict
+    from predict import lighthggep_predict
+    from evaluation import PROTOCOL_NAME, evaluate_her2st_predictions
+    label = test_dataset.label[test_dataset.names[0]]
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    _t0 = time.perf_counter()
+    adata_pred, adata_gt = lighthggep_predict(best_model, test_loader, device=device)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    inference_time_total_s = time.perf_counter() - _t0
 
-# [SỬA lỗi #4] test_loader phải đưa TOÀN BỘ spot của 1 section vào cùng 1 batch (hoặc
-# ít nhất các batch đủ lớn từ cùng 1 section) để Spatial SGC có thể lấy đúng
-# A_norm_full[local_indices][:, local_indices] với đầy đủ thông tin lân cận.
-# Dùng batch_size=1 trước đây → A_norm_batch = (1×1) → SGC không thấy láng giềng nào,
-# hoàn toàn vô nghĩa về mặt không gian.
-# SectionBatchSampler với shuffle=False đảm bảo mỗi batch CHỈ chứa 1 section và
-# duyệt tuần tự, phù hợp cho inference.
-test_sampler = SectionBatchSampler(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
-test_loader = DataLoader(test_dataset, batch_sampler=test_sampler,
-                         collate_fn=section_collate_fn, **eval_loader_options)
+    # Common fair evaluation: metrics are always computed on raw log-normalised
+    # expression.  Only the visualisation/clustering copy is standardised.
+    g = test_dataset.gene_set  # dung dung bo gen cua dataset da chon (785 hoac 250)
+    adata_pred, metrics = evaluate_her2st_predictions(
+        adata_pred, adata_gt, g, label=label, n_clusters=4)
+    R, p_values = metrics['R'], metrics['p_values']
+    Spearman, spearman_pvalues = metrics['Spearman'], metrics['spearman_pvalues']
+    MSE, MAE, RMSE, morans = metrics['MSE'], metrics['MAE'], metrics['RMSE'], metrics['morans']
+    ARI, NMI = metrics['ARI'], metrics['NMI']
 
-# Predict
-label = test_dataset.label[test_dataset.names[0]]
-if torch.cuda.is_available():
-    torch.cuda.synchronize()
-_t0 = time.perf_counter()
-adata_pred, adata_gt = lighthggep_predict(best_model, test_loader, device=device)
-if torch.cuda.is_available():
-    torch.cuda.synchronize()
-inference_time_total_s = time.perf_counter() - _t0
+    # ==================== IN KẾT QUẢ CHI TIẾT ====================
 
-# Common fair evaluation: metrics are always computed on raw log-normalised
-# expression.  Only the visualisation/clustering copy is standardised.
-g = test_dataset.gene_set  # dung dung bo gen cua dataset da chon (785 hoac 250)
-adata_pred, metrics = evaluate_her2st_predictions(
-    adata_pred, adata_gt, g, label=label, n_clusters=4)
-R, p_values = metrics['R'], metrics['p_values']
-Spearman, spearman_pvalues = metrics['Spearman'], metrics['spearman_pvalues']
-MSE, MAE, RMSE, morans = metrics['MSE'], metrics['MAE'], metrics['RMSE'], metrics['morans']
-ARI, NMI = metrics['ARI'], metrics['NMI']
+    print("="*70)
+    print(f"KẾT QUẢ ĐÁNH GIÁ CUỐI CÙNG - Light-HGGEP trên HER2ST (FOLD {FOLD}, tập test)")
+    print("="*70)
 
-# ==================== IN KẾT QUẢ CHI TIẾT ====================
+    # Thông tin tổng quan
+    n_spots = adata_pred.shape[0]
+    inference_time_per_spot_ms = 1000.0 * inference_time_total_s / max(n_spots, 1)
+    print(f"  [INFER TIME] total={inference_time_total_s:.3f}s "
+          f"({n_spots} spot) -> {inference_time_per_spot_ms:.3f} ms/spot")
+    mean_pcc      = metrics['pearson']
+    median_pcc    = metrics['median_pearson']
+    std_pcc       = np.nanstd(R)
+    mean_spearman = metrics['spearman']
+    mean_rmse     = metrics['rmse']
+    mean_mae      = metrics['mae']
+    mean_mi_pred  = metrics['morans_i_pred']
+    mean_mi_gt    = metrics['morans_i_gt']
 
-print("="*70)
-print("KẾT QUẢ ĐÁNH GIÁ CUỐI CÙNG - Light-HGGEP trên HER2ST (tập test)")
-print("="*70)
+    print(f"  Số spot test đã đánh giá  : {n_spots}")
+    print(f"  Số gene đánh giá          : {len(R)}")
+    print(f"")
+    print(f"  [Correlation]")
+    print(f"  Mean Gene-wise PCC        : {mean_pcc:.4f}")
+    print(f"  Median Gene-wise PCC      : {median_pcc:.4f}")
+    print(f"  Std Gene-wise PCC         : {std_pcc:.4f}")
+    print(f"  Mean Gene-wise Spearman   : {mean_spearman:.4f}")
+    print(f"")
+    print(f"  [Error]")
+    print(f"  Mean RMSE                 : {mean_rmse:.4f}")
+    print(f"  Mean MAE                  : {mean_mae:.4f}")
+    print(f"")
+    print(f"  [Spatial structure - top-50 high-var genes]")
+    print(f"  Mean Moran's I (pred)     : {mean_mi_pred:.4f}")
+    print(f"  Mean Moran's I (gt)       : {mean_mi_gt:.4f}")
 
-# Thông tin tổng quan
-n_spots = adata_pred.shape[0]
-inference_time_per_spot_ms = 1000.0 * inference_time_total_s / max(n_spots, 1)
-print(f"  [INFER TIME] total={inference_time_total_s:.3f}s "
-      f"({n_spots} spot) -> {inference_time_per_spot_ms:.3f} ms/spot")
-mean_pcc      = metrics['pearson']
-median_pcc    = metrics['median_pearson']
-std_pcc       = np.nanstd(R)
-mean_spearman = metrics['spearman']
-mean_rmse     = metrics['rmse']
-mean_mae      = metrics['mae']
-mean_mi_pred  = metrics['morans_i_pred']
-mean_mi_gt    = metrics['morans_i_gt']
+    # Tạo DataFrame với thông tin các gene
+    gene_stats = pd.DataFrame({
+        'gene':          g,
+        'pcc':           R,
+        'pcc_pvalue':    p_values,
+        'spearman':      Spearman,
+        'spearman_pval': spearman_pvalues,
+        'mse':           MSE,
+        'rmse':          RMSE,
+        'mae':           MAE,
+    })
 
-print(f"  Số spot test đã đánh giá  : {n_spots}")
-print(f"  Số gene đánh giá          : {len(R)}")
-print(f"")
-print(f"  [Correlation]")
-print(f"  Mean Gene-wise PCC        : {mean_pcc:.4f}")
-print(f"  Median Gene-wise PCC      : {median_pcc:.4f}")
-print(f"  Std Gene-wise PCC         : {std_pcc:.4f}")
-print(f"  Mean Gene-wise Spearman   : {mean_spearman:.4f}")
-print(f"")
-print(f"  [Error]")
-print(f"  Mean RMSE                 : {mean_rmse:.4f}")
-print(f"  Mean MAE                  : {mean_mae:.4f}")
-print(f"")
-print(f"  [Spatial structure - top-50 high-var genes]")
-print(f"  Mean Moran's I (pred)     : {mean_mi_pred:.4f}")
-print(f"  Mean Moran's I (gt)       : {mean_mi_gt:.4f}")
+    # Top-10 gene tốt nhất (PCC cao nhất)
+    print("\nTop-10 gen dự đoán TỐT NHẤT (PCC cao nhất):")
+    top10_best = gene_stats.nlargest(10, 'pcc')[['gene', 'pcc', 'spearman']]
+    print("  " + top10_best.to_string(index=False).replace('\n', '\n  '))
 
-# Tạo DataFrame với thông tin các gene
-gene_stats = pd.DataFrame({
-    'gene':          g,
-    'pcc':           R,
-    'pcc_pvalue':    p_values,
-    'spearman':      Spearman,
-    'spearman_pval': spearman_pvalues,
-    'mse':           MSE,
-    'rmse':          RMSE,
-    'mae':           MAE,
-})
+    # Top-10 gene kém nhất (PCC thấp nhất)
+    print("\nTop-10 gen dự đoán KÉM NHẤT (PCC thấp nhất):")
+    top10_worst = gene_stats.nsmallest(10, 'pcc')[['gene', 'pcc', 'spearman']]
+    print("  " + top10_worst.to_string(index=False).replace('\n', '\n  '))
 
-# Top-10 gene tốt nhất (PCC cao nhất)
-print("\nTop-10 gen dự đoán TỐT NHẤT (PCC cao nhất):")
-top10_best = gene_stats.nlargest(10, 'pcc')[['gene', 'pcc', 'spearman']]
-print("  " + top10_best.to_string(index=False).replace('\n', '\n  '))
+    # Thống kê bổ sung
+    print("\n" + "="*70)
+    print("THỐNG KÊ BỔ SUNG")
+    print("="*70)
+    print(f"  Số gene có PCC > 0:  {np.sum(R > 0):,}/{len(R)} ({100*np.sum(R > 0)/len(R):.1f}%)")
+    print(f"  Số gene có PCC > 0.2: {np.sum(R > 0.2):,}/{len(R)} ({100*np.sum(R > 0.2)/len(R):.1f}%)")
+    print(f"  Số gene có PCC > 0.3: {np.sum(R > 0.3):,}/{len(R)} ({100*np.sum(R > 0.3)/len(R):.1f}%)")
 
-# Top-10 gene kém nhất (PCC thấp nhất)
-print("\nTop-10 gen dự đoán KÉM NHẤT (PCC thấp nhất):")
-top10_worst = gene_stats.nsmallest(10, 'pcc')[['gene', 'pcc', 'spearman']]
-print("  " + top10_worst.to_string(index=False).replace('\n', '\n  '))
+    # ARI + NMI (already computed by the shared protocol on the visualisation copy).
+    if label is not None:
+        print(f"\n  [Global structure]")
+        print(f"  ARI (Adjusted Rand Index) : {ARI:.4f}")
+        print(f"  NMI (Norm. Mutual Info)   : {NMI:.4f}")
+    else:
+        ARI = float('nan')
+        NMI = float('nan')
+        print("\nARI/NMI: N/A (section này không có ground-truth label)")
+    print("="*70)
 
-# Thống kê bổ sung
-print("\n" + "="*70)
-print("THỐNG KÊ BỔ SUNG")
-print("="*70)
-print(f"  Số gene có PCC > 0:  {np.sum(R > 0):,}/{len(R)} ({100*np.sum(R > 0)/len(R):.1f}%)")
-print(f"  Số gene có PCC > 0.2: {np.sum(R > 0.2):,}/{len(R)} ({100*np.sum(R > 0.2)/len(R):.1f}%)")
-print(f"  Số gene có PCC > 0.3: {np.sum(R > 0.3):,}/{len(R)} ({100*np.sum(R > 0.3)/len(R):.1f}%)")
+    # ==================== VẼ HISTOGRAM PCC ====================
 
-# ARI + NMI (already computed by the shared protocol on the visualisation copy).
-if label is not None:
-    print(f"\n  [Global structure]")
-    print(f"  ARI (Adjusted Rand Index) : {ARI:.4f}")
-    print(f"  NMI (Norm. Mutual Info)   : {NMI:.4f}")
-else:
-    ARI = float('nan')
-    NMI = float('nan')
-    print("\nARI/NMI: N/A (section này không có ground-truth label)")
-print("="*70)
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.hist(R, bins=30, color="tab:purple", alpha=0.75, edgecolor="black")
+    ax.axvline(mean_pcc, color="red", linestyle="--", linewidth=2, label=f"Mean PCC = {mean_pcc:.3f}")
+    ax.axvline(median_pcc, color="blue", linestyle="-.", linewidth=2, label=f"Median PCC = {median_pcc:.3f}")
+    ax.set_xlabel("PCC (Pearson Correlation Coefficient)")
+    ax.set_ylabel("Số lượng gen")
+    ax.set_title(f"Phân bố PCC của Light-HGGEP trên {len(R)} gene (HER2ST test set, fold {FOLD})")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    # [MỚI] tên file kèm fold để không đè lên nhau
+    plt.savefig(f"figures/Light-HGGEP_PCC_distribution_fold{FOLD}.png", dpi=300, bbox_inches="tight")
+    plt.close()
 
-# ==================== VẼ HISTOGRAM PCC ====================
+    print(f"\nĐã lưu biểu đồ PCC distribution vào figures/Light-HGGEP_PCC_distribution_fold{FOLD}.png")
 
-fig, ax = plt.subplots(figsize=(9, 5))
-ax.hist(R, bins=30, color="tab:purple", alpha=0.75, edgecolor="black")
-ax.axvline(mean_pcc, color="red", linestyle="--", linewidth=2, label=f"Mean PCC = {mean_pcc:.3f}")
-ax.axvline(median_pcc, color="blue", linestyle="-.", linewidth=2, label=f"Median PCC = {median_pcc:.3f}")
-ax.set_xlabel("PCC (Pearson Correlation Coefficient)")
-ax.set_ylabel("Số lượng gen")
-ax.set_title(f"Phân bố PCC của Light-HGGEP trên {len(R)} gene (HER2ST test set)")
-ax.legend()
-ax.grid(alpha=0.3)
-plt.tight_layout()
-plt.savefig(f"figures/Light-HGGEP_PCC_distribution.png", dpi=300, bbox_inches="tight")
-plt.show()
+    # Lưu toàn bộ kết quả gene stats vào CSV (kèm fold)
+    gene_stats.to_csv(f"gene_predictions_stats_fold{FOLD}.csv", index=False)
+    print(f"Đã lưu thống kê chi tiết từng gene vào gene_predictions_stats_fold{FOLD}.csv")
 
-print(f"\nĐã lưu biểu đồ PCC distribution vào figures/Light-HGGEP_PCC_distribution.png")
-
-# Lưu toàn bộ kết quả gene stats vào CSV
-gene_stats.to_csv(f"gene_predictions_stats.csv", index=False)
-print(f"Đã lưu thống kê chi tiết từng gene vào gene_predictions_stats.csv")
-
-# ============================================================================
-# ---- Cell 29 (notebook gốc) ----
-# ============================================================================
-import matplotlib.pyplot as plt
-
-# K-means clusters
-sc.pl.spatial(adata_pred, img=None, color="kmeans", spot_size=112, 
-              frameon=False, legend_loc=None, title=None, show=False)
-plt.gca().set_title("")
-plt.savefig(f"figures/kmeans/Light-HGGEP_kmeans_fold{FOLD}.png", dpi=300, bbox_inches="tight", transparent=True)
-plt.clf()
-plt.close()
-print(f"Saved: figures/kmeans/Light-HGGEP_kmeans_fold{FOLD}.png")
-
-# FASN gene expression (chỉ khi FASN nằm trong bộ gen đang dùng)
-if "FASN" in adata_pred.var_names:
-    sc.pl.spatial(adata_pred, img=None, color="FASN", spot_size=112,
-                  color_map="magma", frameon=False, legend_loc=None, title=None, show=False)
+    # ----- Cell 29 (notebook gốc): kmeans / FASN figures (đã có fold trong tên) -----
+    # K-means clusters
+    sc.pl.spatial(adata_pred, img=None, color="kmeans", spot_size=112,
+                  frameon=False, legend_loc=None, title=None, show=False)
     plt.gca().set_title("")
-    plt.savefig(f"figures/FASN/Light-HGGEP_FASN_fold{FOLD}.png", dpi=300, bbox_inches="tight", transparent=True)
+    plt.savefig(f"figures/kmeans/Light-HGGEP_kmeans_fold{FOLD}.png", dpi=300, bbox_inches="tight", transparent=True)
     plt.clf()
     plt.close()
-    print(f"Saved: figures/FASN/Light-HGGEP_FASN_fold{FOLD}.png")
+    print(f"Saved: figures/kmeans/Light-HGGEP_kmeans_fold{FOLD}.png")
+
+    # FASN gene expression (chỉ khi FASN nằm trong bộ gen đang dùng)
+    if "FASN" in adata_pred.var_names:
+        sc.pl.spatial(adata_pred, img=None, color="FASN", spot_size=112,
+                      color_map="magma", frameon=False, legend_loc=None, title=None, show=False)
+        plt.gca().set_title("")
+        plt.savefig(f"figures/FASN/Light-HGGEP_FASN_fold{FOLD}.png", dpi=300, bbox_inches="tight", transparent=True)
+        plt.clf()
+        plt.close()
+        print(f"Saved: figures/FASN/Light-HGGEP_FASN_fold{FOLD}.png")
+
+    # ----- Cell 31 (notebook gốc): results row (TRẢ VỀ, không ghi đè) -----
+    row = {
+        'model':          'Light-HGGEP',
+        'fold':           FOLD,
+        'val_section':    VAL_SECTION,
+        'test_section':   test_dataset.names[0],
+        'pearson':        np.nanmean(R),
+        'spearman':       np.nanmean(Spearman),
+        'ari':            ARI,
+        'nmi':            NMI,
+        'rmse':           np.nanmean(RMSE),
+        'mae':            np.nanmean(MAE),
+        'morans_i_pred':  np.nanmean(morans['pred']),
+        'morans_i_gt':    np.nanmean(morans['gt']),
+        'params':         total_params,
+        'inference_time_total_s':     inference_time_total_s,
+        'inference_time_per_spot_ms': inference_time_per_spot_ms,
+        'n_test_spots':   n_spots,
+        'best_val_loss':  float(checkpoint_callback.best_model_score),
+        'eval_protocol':  PROTOCOL_NAME,
+        'split_rule':     'LOOCV test=fold; validation=first alphabetical train slide',
+        'n_genes':        N_GENES,
+        'max_epochs':     MAX_EPOCHS,
+        'learning_rate':  LEARNING_RATE,
+        'optimizer':      'AdamW(weight_decay=1e-4)',
+        'scheduler':      'CosineAnnealingLR(T_max=max_epochs,eta_min=1e-6)',
+        'batch_size':     BATCH_SIZE,
+        'seed':           42,
+        'n_gpus':         N_GPUS,
+        'precision':      '16-mixed' if torch.cuda.is_available() else '32-true',
+    }
+
+    # [MỚI] Giải phóng VRAM giữa các fold để tránh leak.
+    del model, best_model, train_dataset, test_dataset, train_loader, val_loader, test_loader
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return row
+
 
 # ============================================================================
-# ---- Cell 31 (notebook gốc) ----
+# ---- [MỚI] Main loop: chạy từng fold, gộp CSV, in bảng tổng hợp ----
 # ============================================================================
-import pandas as pd
+all_rows = []
+for fold in FOLDS:
+    all_rows.append(run_fold(fold))
 
-results = pd.DataFrame([{
-    'model':          'Light-HGGEP',
-    'fold':           FOLD,
-    'pearson':        np.nanmean(R),
-    'spearman':       np.nanmean(Spearman),
-    'ari':            ARI,
-    'nmi':            NMI,
-    'rmse':           np.nanmean(RMSE),
-    'mae':            np.nanmean(MAE),
-    'morans_i_pred':  np.nanmean(morans['pred']),
-    'morans_i_gt':    np.nanmean(morans['gt']),
-    'params':         total_params,
-    'inference_time_total_s':     inference_time_total_s,
-    'inference_time_per_spot_ms': inference_time_per_spot_ms,
-    'n_test_spots':   n_spots,
-    'best_val_loss':  float(checkpoint_callback.best_model_score),
-    'eval_protocol':  PROTOCOL_NAME,
-    'split_rule':     'LOOCV test=fold; validation=first alphabetical train slide',
-    'n_genes':        N_GENES,
-    'max_epochs':     MAX_EPOCHS,
-    'learning_rate':  LEARNING_RATE,
-    'optimizer':      'AdamW(weight_decay=1e-4)',
-    'scheduler':      'CosineAnnealingLR(T_max=max_epochs,eta_min=1e-6)',
-    'batch_size':     BATCH_SIZE,
-    'seed':           42,
-    'n_gpus':         N_GPUS,
-    'precision':      '16-mixed' if torch.cuda.is_available() else '32-true',
-}])
-
-print("\n" + "="*60)
-print("KET QUA LIGHT-HGGEP")
-print("="*60)
-print(results.to_string(index=False))
-print("="*60)
-
-# Luu ket qua
+results = pd.DataFrame(all_rows)
 results.to_csv("Light-HGGEP_results.csv", index=False)
-print("\nDa luu ket qua vao Light-HGGEP_results.csv")
+print("\n" + "="*72)
+print(f"FINAL AGGREGATED RESULTS -- Light-HGGEP {DATASET} ({len(results)} folds)")
+print("="*72)
+# In bảng metric chính từng fold
+show_cols = ['fold', 'test_section', 'pearson', 'spearman', 'rmse', 'mae', 'ari', 'nmi', 'best_val_loss', 'n_test_spots']
+print(results[show_cols].to_string(index=False))
+print("\n--- MEAN ± STD across folds ---")
+for c in ['pearson', 'spearman', 'rmse', 'mae', 'ari', 'nmi', 'best_val_loss']:
+    col = results[c].dropna()
+    if len(col):
+        print(f"  {c:16s}: mean={col.mean():.4f}  std={col.std():.4f}  (n={len(col)})")
+print("="*72)
+print("\nDa luu ket qua tong hop vao Light-HGGEP_results.csv")
 
 # ============================================================================
 # ---- Cell 33 (notebook gốc) ----
 # ============================================================================
 print("Checkpoints da luu trong:")
 subprocess.run(f"ls -la {CKPT_DIR}", shell=True)  # [DỊCH TỪ IPYTHON] gốc: !ls -la {CKPT_DIR}
-print(f"\nBest checkpoint: {best_ckpt_path}")
-print("\nDe su dung lai session sau, vao tab Output > New Dataset tu thu muc model_ckpts/")
-trainer.strategy.barrier()

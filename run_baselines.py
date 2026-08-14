@@ -9,7 +9,8 @@ Cách dùng:
     python run_baselines.py --mode histogene
 
 Tùy chọn:
-    --fold        : LOOCV fold (default: 5)
+    --fold-start  : fold đầu (inclusive, default 0)
+    --fold-end    : fold cuối (exclusive, default 5 = 5-fold LOOCV fold 0..4)
     --n_genes     : số gene dự đoán (default: 785)
     --max_epochs  : số epoch tối đa
     --batch_size  : batch size
@@ -58,7 +59,10 @@ parser = argparse.ArgumentParser(description="Baseline pipeline cho HER2ST")
 parser.add_argument("--mode",       type=str, required=True,
                     choices=["histogene", "stnet", "all"],
                     help="Model muốn chạy. 'all' = chạy các baseline tương thích giao thức chung.")
-parser.add_argument("--fold",       type=int,   default=5)
+parser.add_argument("--fold-start", type=int,   default=0,
+                    help="Fold dau tien (inclusive). Mac dinh 0.")
+parser.add_argument("--fold-end",   type=int,   default=5,
+                    help="Fold cuoi (exclusive). Mac dinh 5 = 5-fold LOOCV (fold 0..4).")
 parser.add_argument("--n_genes",    type=int,   default=785)
 parser.add_argument("--max_epochs", type=int,   default=None)
 parser.add_argument("--batch_size", type=int,   default=None)
@@ -79,10 +83,11 @@ parser.add_argument("--num_workers", type=int, default=2,
                     help="DataLoader workers trên mỗi DDP rank (default: 2).")
 args = parser.parse_args()
 
-FOLD    = args.fold
+FOLD    = args.fold_start
 N_GENES = args.n_genes
 LR      = args.lr
 NUM_WORKERS = args.num_workers
+FOLDS   = range(args.fold_start, args.fold_end)
 
 # Số GPU
 n_available = torch.cuda.device_count()
@@ -93,7 +98,7 @@ else:
 N_GPUS = max(N_GPUS, 1)           # ít nhất 1
 
 print("=" * 60)
-print(f"BASELINE PIPELINE  mode={args.mode.upper()}  fold={FOLD}")
+print(f"BASELINE PIPELINE  mode={args.mode.upper()}  folds={list(FOLDS)}")
 print("=" * 60)
 print(f"  GPU available : {n_available}  →  dùng {N_GPUS} GPU")
 print(f"  n_genes       : {N_GENES}")
@@ -549,21 +554,23 @@ for mode in modes_to_run:
     # [MỚI] HisToGene dùng LR riêng nếu được set qua --histogene_lr, không thì fallback về LR chung
     mode_lr = args.histogene_lr if (mode == "histogene" and args.histogene_lr is not None) else LR
 
-    result = run_one(
-        mode       = mode,
-        fold       = FOLD,
-        n_genes    = N_GENES,
-        lr         = mode_lr,
-        max_epochs = max_ep,
-        batch_size = bs,
-        ckpt_dir   = args.ckpt_dir,
-        ckpt_path  = ckpt_p,
-        skip_train = skip_train,
-        n_gpus     = N_GPUS,
-        num_workers = NUM_WORKERS,
-    )
-    if result is not None:
-        all_results.append(result)
+    for fold in FOLDS:
+        print(f"\n{'#'*72}\n# MODE={mode.upper()}  FOLD={fold}\n{'#'*72}")
+        result = run_one(
+            mode       = mode,
+            fold       = fold,
+            n_genes    = N_GENES,
+            lr         = mode_lr,
+            max_epochs = max_ep,
+            batch_size = bs,
+            ckpt_dir   = args.ckpt_dir,
+            ckpt_path  = ckpt_p,
+            skip_train = skip_train,
+            n_gpus     = N_GPUS,
+            num_workers = NUM_WORKERS,
+        )
+        if result is not None:
+            all_results.append(result)
 
 # ── Bảng tổng kết cuối ───────────────────────────────────────────────────────
 if all_results:
@@ -571,8 +578,18 @@ if all_results:
     print(f"\n{'='*70}")
     print("TỔNG KẾT TẤT CẢ BASELINE")
     print(f"{'='*70}")
-    cols = ["model", "pearson", "spearman", "ari", "nmi", "rmse", "mae",
+    cols = ["model", "fold", "pearson", "spearman", "ari", "nmi", "rmse", "mae",
             "morans_i_pred", "params"]
     cols = [c for c in cols if c in df.columns]
-    print(df[cols].sort_values("pearson", ascending=False).to_string(index=False))
+    print(df[cols].sort_values(["model", "fold"]).to_string(index=False))
+    # Mean ± std per model across folds
+    print(f"\n--- MEAN ± STD per model across folds ---")
+    for model_name in sorted(df["model"].unique()):
+        sub = df[df["model"] == model_name]
+        print(f"  {model_name}:")
+        for c in ["pearson", "spearman", "rmse", "mae", "ari", "nmi"]:
+            if c in sub.columns:
+                col = sub[c].dropna()
+                if len(col):
+                    print(f"    {c:12s}: mean={col.mean():.4f}  std={col.std():.4f}  (n={len(col)})")
     print(f"{'='*70}")
