@@ -54,6 +54,27 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 WORKDIR = str(pathlib.Path(__file__).parent.resolve())
 os.chdir(WORKDIR)
 
+# ── Clone + giải nén data HER2ST (giống run_pipeline.py) ───────────────────────
+import subprocess
+import glob
+import shutil
+
+if not os.path.isdir("data/her2st/.git"):
+    subprocess.run("git clone https://github.com/almaan/her2st.git", shell=True, cwd="data")
+else:
+    print("data/her2st da ton tai, bo qua clone.")
+
+cnt_dir = "data/her2st/data/ST-cnts"
+if os.path.isdir(cnt_dir):
+    gz_files = [f for f in os.listdir(cnt_dir) if f.endswith(".gz")]
+    if gz_files:
+        subprocess.run(f"cd {cnt_dir} && gunzip -f *.gz", shell=True)
+        print(f"Da giai nen {len(gz_files)} file.")
+    else:
+        print("Khong con file .gz (co the da giai nen roi).")
+else:
+    raise SystemExit("Thieu data/her2st/data/ST-cnts -- clone that bai?")
+
 # ── Argument parsing ──────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Baseline pipeline cho HER2ST")
 parser.add_argument("--mode",       type=str, required=True,
