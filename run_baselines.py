@@ -263,12 +263,18 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
 
     max_ep = max_epochs if max_epochs is not None else _default_epochs[mode]
     bs     = batch_size if batch_size is not None else _default_bs[mode]
+    # [SỬA treo fold>1] persistent_workers=True giữ worker qua fold; khi fold kết thúc
+    # trainer teardown kill worker cũ nhưng fold sau tạo DataLoader mới -> race, worker
+    # (pid) chết, queue.Empty treo. persistent_workers=False spawn lại mỗi epoch/loader
+    # (chậm hơn chút, KHÔNG bao giờ treo) + timeout báo lỗi sớm thay vì treo vô hạn.
     loader_options = dict(num_workers=num_workers,
                           pin_memory=torch.cuda.is_available(),
-                          persistent_workers=num_workers > 0)
+                          persistent_workers=False,
+                          timeout=180)
     eval_loader_options = dict(num_workers=num_workers,
                                pin_memory=torch.cuda.is_available(),
-                               persistent_workers=False)
+                               persistent_workers=False,
+                               timeout=180)
     ckpt_out_dir = os.path.join(ckpt_dir, mode)
     os.makedirs(ckpt_out_dir, exist_ok=True)
     os.makedirs("figures/kmeans", exist_ok=True)
@@ -397,6 +403,17 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
         print(f"  Best checkpoint: {ckpt_path}")
         print(f"  Best val loss  : {checkpoint_cb.best_model_score:.4f}"
               if hasattr(checkpoint_cb, "best_model_score") else "")
+
+        # [SỬA treo fold>1] Giải phóng sạch worker DataLoader + VRAM ngay sau khi fold
+        # kết thúc, tránh worker cũ còn treo khi fold sau khởi tạo loader mới.
+        for loader in (train_loader, val_loader):
+            try:
+                loader._iterator._shutdown_workers() if loader._iterator else None
+            except Exception:
+                pass
+        del train_loader, val_loader, ds_aug, ds_noaug, model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     else:
         if ckpt_path is None:
