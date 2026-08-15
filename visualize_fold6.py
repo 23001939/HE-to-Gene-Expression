@@ -7,6 +7,10 @@ import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, Sampler
 import math
 import sys
+from PIL import Image
+
+# Bỏ qua giới hạn kích thước ảnh của PIL (phòng trường hợp ảnh WSI quá lớn)
+Image.MAX_IMAGE_PIXELS = None
 
 WORKDIR = os.path.dirname(os.path.abspath(__file__))
 if WORKDIR not in sys.path:
@@ -64,11 +68,25 @@ def section_collate_fn(batch):
         local_idx = torch.tensor([b[5] for b in batch], dtype=torch.long)
         return patch_3ch, loc, exp, center, section_name, local_idx
 
+def find_image_path(img_dir, section_name):
+    """Hàm hỗ trợ tìm file ảnh gốc với các định dạng phổ biến."""
+    for ext in ['.jpg', '.png', '.tif', '.jpeg']:
+        path = os.path.join(img_dir, f"{section_name}{ext}")
+        if os.path.exists(path):
+            return path
+        # Thử trường hợp viết hoa
+        path_upper = os.path.join(img_dir, f"{section_name}{ext.upper()}")
+        if os.path.exists(path_upper):
+            return path_upper
+    return None
+
 def main():
     _p = argparse.ArgumentParser()
     _p.add_argument("--gene", default="FASN")
     _p.add_argument("--section", default=None, help="Section test cụ thể (vd A6).")
     _p.add_argument("--ckpt", default=CKPT)
+    # THÊM THAM SỐ: Thư mục chứa ảnh gốc
+    _p.add_argument("--img_dir", default="data/ST-imgs", help="Đường dẫn đến thư mục chứa ảnh H&E gốc")
     args = _p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -79,6 +97,7 @@ def main():
     n_genes = len(test_dataset.gene_set)
     
     target_sections = [args.section] if args.section else test_dataset.names
+    current_section = target_sections[0]
     print(f"  n_genes = {n_genes}, target_sections = {target_sections}")
 
     # --- Model ---
@@ -102,21 +121,19 @@ def main():
     # --- Predict ---
     adata_pred, adata_gt = lighthggep_predict(model, loader, device=device)
 
-    # --- Lấy patch của section cần vẽ ---
-    all_patches, all_centers = [], []
+    # --- Lấy tọa độ centers của section ---
+    all_centers = []
     for batch in loader:
-        patch_3ch, positions, exp, centers, section_name, local_indices = batch
+        _, _, _, centers, section_name, _ = batch
         if section_name in target_sections:
-            all_patches.append(patch_3ch.cpu())
             all_centers.append(centers.cpu())
             
-    if not all_patches:
+    if not all_centers:
         print(f"Không tìm thấy dữ liệu cho section {target_sections}. Thoát.")
         return
 
-    patches = torch.cat(all_patches, dim=0).numpy()
-    centers = torch.cat(all_centers, dim=0).numpy()  # Sử dụng TỌA ĐỘ PIXEL THỰC TẾ
-    n_spots = patches.shape[0]
+    centers = torch.cat(all_centers, dim=0).numpy()
+    n_spots = centers.shape[0]
     
     # --- Chọn gene ---
     gene_names = list(test_dataset.gene_set)
@@ -134,53 +151,37 @@ def main():
     gt_vals = adata_gt.X[:n_spots, gidx].astype(float)
 
     # =========================================================================
-    # [FIX CỐT LÕI]: Cột 1 - Ghép ảnh đầu vào dựa trên tọa độ PIXEL (centers)
-    # =========================================================================
-    H, W = patches.shape[-2:]
-    
-    # `centers` đang là điểm trung tâm của patch. 
-    # Ta suy ra góc trên-trái (top-left) của patch bằng cách trừ đi nửa chiều dài/rộng.
-    top_lefts = centers.copy()
-    top_lefts[:, 0] -= W / 2.0
-    top_lefts[:, 1] -= H / 2.0
-    
-    # Chuẩn hóa để tọa độ nhỏ nhất bắt đầu từ (0,0) trên Canvas
-    top_lefts -= top_lefts.min(axis=0)
-    
-    # Khởi tạo Canvas trắng (Tương đương kích thước bounding box bao trọn toàn bộ patch)
-    canvas_w = int(np.ceil(top_lefts[:, 0].max() + W))
-    canvas_h = int(np.ceil(top_lefts[:, 1].max() + H))
-    canvas = np.ones((canvas_h, canvas_w, 3), dtype=np.float32)
-
-    mean = np.array([0.485, 0.456, 0.406]).reshape(3, 1, 1)
-    std = np.array([0.229, 0.224, 0.225]).reshape(3, 1, 1)
-
-    for i in range(n_spots):
-        px = int(top_lefts[i, 0])
-        py = int(top_lefts[i, 1])
-        
-        # Unnormalize ImageNet -> RGB [0, 1]
-        img = patches[i] * std + mean
-        img = np.clip(img, 0, 1).transpose(1, 2, 0)
-        
-        # Đổ ảnh vào đúng vị trí tọa độ
-        canvas[py:py + H, px:px + W] = img
-
-    # =========================================================================
-    # VẼ 3 CỘT
+    # CHUẨN BỊ ẢNH GỐC VÀ TỌA ĐỘ VẼ
     # =========================================================================
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
 
-    axes[0].imshow(canvas)
-    axes[0].set_title(f"(1) Input H&E patches\n{n_spots} spots")
+    # Tính toán Bounding Box của mô dựa trên tọa độ spots (có thêm padding)
+    pad = 200 # Mở rộng khung viền thêm 200 pixels để ảnh không bị cắt quá sát
+    min_x, max_x = centers[:, 0].min() - pad, centers[:, 0].max() + pad
+    min_y, max_y = centers[:, 1].min() - pad, centers[:, 1].max() + pad
+
+    # Load ảnh gốc
+    img_path = find_image_path(args.img_dir, current_section)
+    if img_path:
+        print(f"Loaded original image: {img_path}")
+        orig_img = Image.open(img_path)
+        axes[0].imshow(orig_img)
+    else:
+        print(f"Warning: Không tìm thấy file ảnh cho '{current_section}' trong '{args.img_dir}'.")
+        axes[0].text(0.5, 0.5, f"Không tìm thấy ảnh gốc:\nThư mục {args.img_dir}", 
+                     ha='center', va='center', fontsize=12)
+        axes[0].set_facecolor('#f0f0f0')
+
+    axes[0].set_title(f"(1) Input H&E Original Image\n{n_spots} spots")
     axes[0].axis("off")
 
+    # =========================================================================
+    # VẼ CỘT 2 VÀ CỘT 3
+    # =========================================================================
     # Cột 2
     sc = axes[1].scatter(centers[:, 0], centers[:, 1], c=pred_vals, cmap="magma",
                          s=40, edgecolors="k", linewidths=0.3)
     axes[1].set_title(f"(2) Prediction: {gname}\nmean={pred_vals.mean():.3f}")
-    axes[1].invert_yaxis() 
-    axes[1].axis("equal")
     axes[1].axis("off")
     plt.colorbar(sc, ax=axes[1], fraction=0.046, pad=0.04)
 
@@ -188,12 +189,16 @@ def main():
     sc2 = axes[2].scatter(centers[:, 0], centers[:, 1], c=gt_vals, cmap="magma",
                           s=40, edgecolors="k", linewidths=0.3)
     axes[2].set_title(f"(3) Ground Truth: {gname}\nmean={gt_vals.mean():.3f}")
-    axes[2].invert_yaxis()
-    axes[2].axis("equal")
     axes[2].axis("off")
     plt.colorbar(sc2, ax=axes[2], fraction=0.046, pad=0.04)
 
-    sec_title = target_sections[0] if len(target_sections) == 1 else "All Test Sections"
+    # ĐỒNG BỘ GIỚI HẠN HIỂN THỊ (BOUNDING BOX) CHO CẢ 3 CỘT
+    for ax in axes:
+        ax.set_xlim(min_x, max_x)
+        ax.set_ylim(max_y, min_y) # Trục Y của hình ảnh luôn đi từ trên xuống dưới (invert)
+        ax.set_aspect('equal')    # Đảm bảo tỉ lệ khung hình chuẩn, không bị bóp méo
+
+    sec_title = current_section
     plt.suptitle(f"Light-HGGEP fold {FOLD} | section {sec_title} | gene {gname}", fontsize=14)
     plt.tight_layout()
     
