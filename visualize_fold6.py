@@ -163,14 +163,21 @@ def main():
 
     # Load ảnh gốc
     img_path = find_image_path(args.img_dir, current_section)
+    # Load ảnh gốc
+    if args.img_path and os.path.exists(args.img_path):
+        # Nếu người dùng truyền đường dẫn trực tiếp và file tồn tại
+        img_path = args.img_path
+    else:
+        # Nếu không, tự động tìm trong thư mục img_dir
+        img_path = find_image_path(args.img_dir, current_section)
+
     if img_path:
         print(f"Loaded original image: {img_path}")
         orig_img = Image.open(img_path)
         axes[0].imshow(orig_img)
     else:
-        print(f"Warning: Không tìm thấy file ảnh cho '{current_section}' trong '{args.img_dir}'.")
-        axes[0].text(0.5, 0.5, f"Không tìm thấy ảnh gốc:\nThư mục {args.img_dir}", 
-                     ha='center', va='center', fontsize=12)
+        print(f"Warning: Không tìm thấy file ảnh!")
+        axes[0].text(0.5, 0.5, "Không tìm thấy ảnh gốc", ha='center', va='center', fontsize=12)
         axes[0].set_facecolor('#f0f0f0')
 
     axes[0].set_title(f"(1) Input H&E Original Image\n{n_spots} spots")
