@@ -85,8 +85,7 @@ def main():
     _p.add_argument("--gene", default="FASN")
     _p.add_argument("--section", default=None, help="Section test cụ thể (vd A6).")
     _p.add_argument("--ckpt", default=CKPT)
-    # THÊM THAM SỐ: Thư mục chứa ảnh gốc
-    _p.add_argument("--img_dir", default="data/ST-imgs", help="Đường dẫn đến thư mục chứa ảnh H&E gốc")
+    _p.add_argument("--img_dir", default="data/ST-imgs", help="Thư mục chứa ảnh H&E gốc")
     _p.add_argument("--img_path", default=None, help="Đường dẫn TRỰC TIẾP đến file ảnh")
     args = _p.parse_args()
 
@@ -162,13 +161,9 @@ def main():
     min_y, max_y = centers[:, 1].min() - pad, centers[:, 1].max() + pad
 
     # Load ảnh gốc
-    img_path = find_image_path(args.img_dir, current_section)
-    # Load ảnh gốc
     if args.img_path and os.path.exists(args.img_path):
-        # Nếu người dùng truyền đường dẫn trực tiếp và file tồn tại
         img_path = args.img_path
     else:
-        # Nếu không, tự động tìm trong thư mục img_dir
         img_path = find_image_path(args.img_dir, current_section)
 
     if img_path:
