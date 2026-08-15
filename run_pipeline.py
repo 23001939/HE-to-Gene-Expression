@@ -406,16 +406,19 @@ def run_fold(fold):
     print(f"DDP data shard: rank {DDP_RANK}/{DDP_WORLD_SIZE}; "
           f"train sections={len(train_sampler.section_names)}, "
           f"train batches={len(train_sampler)}", flush=True)
+    # [SỬA] timeout chỉ set khi num_workers>0: num_workers=0 dùng
+    # _SingleProcessDataLoaderIter, PyTorch yêu cầu timeout==0.
+    _to = (180 if NUM_WORKERS > 0 else 0)
     loader_options = dict(num_workers=NUM_WORKERS,
                           pin_memory=torch.cuda.is_available(),
                           persistent_workers=NUM_WORKERS > 0,
-                          timeout=180)
+                          timeout=_to)
     eval_loader_options = dict(num_workers=NUM_WORKERS,
                                pin_memory=torch.cuda.is_available(),
                                # Avoid keeping train and validation worker caches
                                # alive simultaneously on every DDP rank.
                                persistent_workers=False,
-                               timeout=180)
+                               timeout=_to)
     train_loader = DataLoader(train_dataset, batch_sampler=train_sampler,
                               collate_fn=section_collate_fn, **loader_options)
     val_loader = DataLoader(train_dataset, batch_sampler=val_sampler,

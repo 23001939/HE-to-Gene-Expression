@@ -270,15 +270,17 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
     # [SỬA treo fold>1] persistent_workers=True giữ worker qua fold; khi fold kết thúc
     # trainer teardown kill worker cũ nhưng fold sau tạo DataLoader mới -> race, worker
     # (pid) chết, queue.Empty treo. persistent_workers=False spawn lại mỗi epoch/loader
-    # (chậm hơn chút, KHÔNG bao giờ treo) + timeout báo lỗi sớm thay vì treo vô hạn.
+    # (chậm hơn chút, KHÔNG bao giờ treo). [SỬA] timeout chỉ set khi num_workers>0:
+    # num_workers=0 dùng _SingleProcessDataLoaderIter, PyTorch yêu cầu timeout==0,
+    # đặt 180 -> AssertionError ngay sanity check.
     loader_options = dict(num_workers=num_workers,
                           pin_memory=torch.cuda.is_available(),
                           persistent_workers=False,
-                          timeout=180)
+                          timeout=(180 if num_workers > 0 else 0))
     eval_loader_options = dict(num_workers=num_workers,
                                pin_memory=torch.cuda.is_available(),
                                persistent_workers=False,
-                               timeout=180)
+                               timeout=(180 if num_workers > 0 else 0))
     ckpt_out_dir = os.path.join(ckpt_dir, mode)
     os.makedirs(ckpt_out_dir, exist_ok=True)
     os.makedirs("figures/kmeans", exist_ok=True)
