@@ -102,8 +102,10 @@ parser.add_argument("--skip_train", action="store_true",
                     help="Chỉ dùng khi --mode không phải 'all'")
 parser.add_argument("--n_gpus",     type=int,   default=None,
                     help="Số GPU dùng. Mặc định: 1, giống Light-HGGEP.")
-parser.add_argument("--num_workers", type=int, default=2,
-                    help="DataLoader workers trên mỗi DDP rank (default: 2).")
+parser.add_argument("--num_workers", type=int, default=0,
+                    help="DataLoader workers trên mỗi DDP rank (default: 0). "
+                         "0 để tránh fork worker chết vì CUDA context đã có trong main "
+                         "process (lỗi 'DataLoader worker exited unexpectedly' giữa fold).")
 args = parser.parse_args()
 
 FOLD    = args.fold_start
