@@ -87,6 +87,7 @@ def main():
     _p.add_argument("--ckpt", default=CKPT)
     # THÊM THAM SỐ: Thư mục chứa ảnh gốc
     _p.add_argument("--img_dir", default="data/ST-imgs", help="Đường dẫn đến thư mục chứa ảnh H&E gốc")
+    _p.add_argument("--img_path", default=None, help="Đường dẫn TRỰC TIẾP đến file ảnh")
     args = _p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
