@@ -584,10 +584,6 @@ def run_fold(fold):
     from predict import lighthggep_predict
     from evaluation import PROTOCOL_NAME, evaluate_her2st_predictions
     import scanpy as sc
-    import numpy as np
-    import torch
-    import pandas as pd
-    import matplotlib.pyplot as plt
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
