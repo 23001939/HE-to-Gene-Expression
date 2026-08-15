@@ -34,7 +34,7 @@ class LightHGGEP(pl.LightningModule):
     5. Prediction Head: Linear(128 -> n_genes)
     """
     def __init__(self, n_genes=785, k_neighbors=4, learning_rate=1e-4, max_epochs=100,
-                 cnn_chunk=64, use_sgc=True, sgc_nonlinear=True, sgc_alpha=1.0):
+                 cnn_chunk=64, use_sgc=True, sgc_nonlinear=True, sgc_alpha=1.0, sgc_hops=2):
         super().__init__()
         self.save_hyperparameters()
 
@@ -51,6 +51,11 @@ class LightHGGEP(pl.LightningModule):
         # (vd 0.3) de SGC chi hieu chinh nhe, giu PCC cao nhung van giu kien
         # truc SGC cua paper.
         self.sgc_alpha = sgc_alpha
+        # [TUNE] so lan lan truyen (hop) tren do thi KNN khong gian. SGC goc
+        # thuan tuyen: A_norm^sgc_hops @ z_spot. Mac dinh 2-hop (paper). Tang
+        # len de mo rong tam anh huong khong gian, giam xuong 1 de chi lay
+        # truc tiep hang xom. Phai >= 1.
+        self.sgc_hops = max(int(sgc_hops), 1)
         # Stage 1: Low-level (nuclei features)
         self.stage1 = nn.Sequential(
             DepthwiseSeparableConv(3, 64, kernel_size=3, padding=1),
@@ -192,16 +197,17 @@ class LightHGGEP(pl.LightningModule):
             A_norm_full = self.A_norm_cache[section_name].to(dev)
             z = z_spot
             if self.sgc_nonlinear:
-                # [PHI TUYEN] GCN nhe 2-hop: lan truyen -> Linear -> ReLU ->
-                # lan truyen -> ReLU. Co phi tuyen nen hoc duoc bien/duc dac
-                # trung khong gian thay vi chi lam tron. Residual giu z_spot.
-                z = A_norm_full @ z                       # hop 1 (propagation)
-                z = self.sgc_act(self.sgc_weight(z))       # Linear + ReLU
-                z = A_norm_full @ z                       # hop 2 (propagation)
+                # [PHI TUYEN] GCN nhe sgc_hops-hop: lan truyen -> Linear -> ReLU
+                # giua cac hop (tru hop cuoi). Co phi tuyen nen hoc duoc bien/duc
+                # dac trung khong gian thay vi chi lam tron. Residual giu z_spot.
+                for i in range(self.sgc_hops):
+                    z = A_norm_full @ z                   # hop i+1 (propagation)
+                    if i < self.sgc_hops - 1:
+                        z = self.sgc_act(self.sgc_weight(z))   # Linear + ReLU giua hop
                 z_hat = z_spot + self.sgc_alpha * self.sgc_act(z)   # residual * alpha
             else:
-                # SGC goc (thuan tuyen): A_norm^2 @ z_spot roi Linear, khong act
-                for _ in range(2):
+                # SGC goc (thuan tuyen): A_norm^sgc_hops @ z_spot roi Linear, khong act
+                for _ in range(self.sgc_hops):
                     z = A_norm_full @ z
                 z_hat = z_spot + self.sgc_alpha * self.sgc_weight(z)
         else:

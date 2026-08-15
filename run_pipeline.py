@@ -186,6 +186,10 @@ _p.add_argument('--sgc_alpha', type=float, default=0.3,
                      "truc khong gian san, SGC full (1.0) lam tron qua da -> PCC tut. "
                      "Mac dinh 0.3: SGC chi hieu chinh nhe, giu PCC cao + giu kien "
                      "truc SGC. 0.0 ~ tat SGC, 1.0 = SGC goc.")
+_p.add_argument('--sgc_hops', type=int, default=2,
+                help="So lan lan truyen (hop) tren do thi KNN khong gian cua SGC "
+                     "(chi voi --use_sgc). Mac dinh 2 (paper). Tang de mo rong tam "
+                     "anh huong khong gian, 1 = chi hang xom truc tiep. Toi thieu 1.")
 _args = _p.parse_args()
 DATASET = _args.datasets
 # [SGC] AB chung to SGC full lam giam PCC tren HER2ST (0.189 vs 0.259 CNN thuan).
@@ -194,6 +198,7 @@ DATASET = _args.datasets
 USE_SGC = _args.use_sgc
 SGC_ALPHA = _args.sgc_alpha
 SGC_NONLINEAR = not _args.no_sgc_nonlinear
+SGC_HOPS = max(int(_args.sgc_hops), 1)
 N_GENES = None  # tu dong lay tu dataset gene_set neu de None
 MAX_EPOCHS = 100
 PATIENCE = 15
@@ -214,6 +219,11 @@ print(f"  PATIENCE = {PATIENCE}")
 print(f"  LEARNING_RATE = {LEARNING_RATE}")
 print(f"  BATCH_SIZE = {BATCH_SIZE}")
 print(f"  NUM_WORKERS = {NUM_WORKERS} per DDP rank")
+print(f"  USE_SGC = {USE_SGC}")
+if USE_SGC:
+    print(f"  SGC_HOPS = {SGC_HOPS}")
+    print(f"  SGC_NONLINEAR = {SGC_NONLINEAR}")
+    print(f"  SGC_ALPHA = {SGC_ALPHA}")
 
 # ============================================================================
 # ---- Cell 22 (notebook gốc) ----
@@ -482,6 +492,7 @@ model = LightHGGEP(
     use_sgc=USE_SGC,
     sgc_nonlinear=SGC_NONLINEAR,
     sgc_alpha=SGC_ALPHA,
+    sgc_hops=SGC_HOPS,
 )
 
 # Set graph cho model
@@ -570,7 +581,8 @@ best_model = LightHGGEP.load_from_checkpoint(
     cnn_chunk=64,
     use_sgc=USE_SGC,
     sgc_nonlinear=SGC_NONLINEAR,
-    sgc_alpha=SGC_ALPHA
+    sgc_alpha=SGC_ALPHA,
+    sgc_hops=SGC_HOPS
 )
 
 # Set graph cho model (cho test set)
