@@ -186,12 +186,10 @@ def main():
     if orig_img is not None:
         axes[1].imshow(orig_img) # Chèn ảnh nền
     
-    # alpha=0.8 giúp các chấm hơi trong suốt để thấy được mô nền
     sc = axes[1].scatter(centers[:, 0], centers[:, 1], c=pred_vals, cmap="magma",
                          s=40, edgecolors="k", linewidths=0.3, alpha=0.8)
     axes[1].set_title(f"(2) Prediction: {gname}\nmean={pred_vals.mean():.3f}")
     axes[1].axis("off")
-    plt.colorbar(sc, ax=axes[1], fraction=0.046, pad=0.04)
 
     # Cột 3
     if orig_img is not None:
@@ -201,7 +199,6 @@ def main():
                           s=40, edgecolors="k", linewidths=0.3, alpha=0.8)
     axes[2].set_title(f"(3) Ground Truth: {gname}\nmean={gt_vals.mean():.3f}")
     axes[2].axis("off")
-    plt.colorbar(sc2, ax=axes[2], fraction=0.046, pad=0.04)
 
     # ĐỒNG BỘ GIỚI HẠN HIỂN THỊ (BOUNDING BOX) CHO CẢ 3 CỘT
     for ax in axes:
@@ -210,7 +207,6 @@ def main():
         ax.set_aspect('equal')    # Đảm bảo tỉ lệ khung hình chuẩn, không bị bóp méo
 
     sec_title = current_section
-    plt.suptitle(f"Light-HGGEP fold {FOLD} | section {sec_title} | gene {gname}", fontsize=14)
     plt.tight_layout()
     
     out = f"figures/fold{FOLD}_{sec_title}_viz_{gname}.png"
