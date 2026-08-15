@@ -401,6 +401,11 @@ print("Đã định nghĩa SectionBatchSampler / section_collate_fn (vá lỗi b
 def run_fold(fold):
     """Chay toan bo pipeline (train -> eval -> visualize) cho 1 fold.
     Tra ve DataFrame ket qua 1 dong cua fold do."""
+    # [K-FOLD] cac bien config co the bi gan lai ben trong ham (N_GENES, USE_SGC,
+    # BATCH_SIZE) -> khai bao global de khong bi UnboundLocalError va de lai gia
+    # tri cho cac fold sau (datasets brainst bat buoc USE_SGC=True, va SGC bat
+    # thi BATCH_SIZE bi ghi de thanh max(section lengths)).
+    global N_GENES, USE_SGC, BATCH_SIZE, VAL_SECTION
     # ---- Cell 25 (notebook gốc) ----
     # ============================================================================
     from dataset import LightHGGEP_HER2ST, LightHGGEP_HER2ST_Top250, LightHGGEP_BRAINST
