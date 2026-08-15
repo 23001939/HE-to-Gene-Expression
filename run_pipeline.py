@@ -704,12 +704,24 @@ def run_fold(fold):
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    # [SỬA đầy ổ đĩa] Xóa toàn bộ checkpoint đã sinh trong fold này (best đã load vào
-    # best_model xong). Giải phóng dung lượng cho fold tiếp theo trên Kaggle.
+    # [SỬA đầy ổ đĩa] Xóa ckpt của CÁC FOLD TRƯỚC fold hiện tại, GIỮ lại ckpt fold này
+    # (best đã load vào best_model, nhưng giữ file để dùng lại predict sau này). Vẫn
+    # giải phóng đĩa cho fold tiếp theo trên Kaggle mà không mất trọng số fold vừa chạy.
     if os.path.isdir(CKPT_DIR):
-        shutil.rmtree(CKPT_DIR, ignore_errors=True)
-        os.makedirs(CKPT_DIR, exist_ok=True)
-        print(f"  [space] removed {CKPT_DIR} to free disk for next fold")
+        for fn in os.listdir(CKPT_DIR):
+            if fn.startswith("lighthggep_fold") and fn.endswith(".ckpt"):
+                try:
+                    fnum = int(fn.replace("lighthggep_fold", "").split("_")[0])
+                except (IndexError, ValueError):
+                    continue
+                if fnum < FOLD:
+                    try:
+                        os.remove(os.path.join(CKPT_DIR, fn))
+                    except OSError:
+                        pass
+        kept = [f for f in os.listdir(CKPT_DIR)
+                if f.startswith(f"lighthggep_fold{FOLD}_")]
+        print(f"  [space] kept fold-{FOLD} ckpt(s): {kept}")
 
     return row
 
@@ -722,7 +734,15 @@ for fold in FOLDS:
     all_rows.append(run_fold(fold))
 
 results = pd.DataFrame(all_rows)
-results.to_csv("Light-HGGEP_results.csv", index=False)
+# [SỬA ghi đè] Append an toàn: giữ các fold cũ trong CSV, chỉ nối fold mới (xóa trùng
+# theo cột 'fold'), để chạy lẻ từng fold (vd --fold-start 5 --fold-end 6) không mất
+# kết quả các fold đã chạy trước đó. Khớp logic append của run_baselines.py.
+summary_csv = "Light-HGGEP_results.csv"
+if os.path.isfile(summary_csv):
+    old = pd.read_csv(summary_csv)
+    old = old[~old["fold"].isin(results["fold"])]
+    results = pd.concat([old, results], ignore_index=True)
+results.to_csv(summary_csv, index=False)
 print("\n" + "="*72)
 print(f"FINAL AGGREGATED RESULTS -- Light-HGGEP {DATASET} ({len(results)} folds)")
 print("="*72)

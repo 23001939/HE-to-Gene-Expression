@@ -575,11 +575,25 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
     summary.to_csv(summary_csv, index=False)
     print(f"  Saved summary → {summary_csv}")
 
-    # [SỬA đầy ổ đĩa] Xóa toàn bộ ckpt của model này sau khi fold xong (best đã load
-    # vào m rồi, không cần giữ). Giải phóng dung lượng cho fold tiếp theo trên Kaggle.
+    # [SỬA đầy ổ đĩa] Xóa ckpt của CÁC FOLD TRƯỚC fold hiện tại, GIỮ lại ckpt của fold
+    # này (best đã load vào m, nhưng giữ file để dùng lại predict). Vẫn giải phóng đĩa
+    # cho fold tiếp theo trên Kaggle mà không làm mất trọng số fold vừa chạy.
     if os.path.isdir(ckpt_out_dir):
-        shutil.rmtree(ckpt_out_dir, ignore_errors=True)
-        print(f"  [space] removed {ckpt_out_dir} to free disk for next fold")
+        for fn in os.listdir(ckpt_out_dir):
+            # tên file dạng "{mode}_fold{fold}_{epoch}..." -> lấy số fold sau "_fold"
+            try:
+                fnum = int(fn.split("_fold")[1].split("_")[0])
+            except (IndexError, ValueError):
+                continue
+            if fnum < fold:
+                try:
+                    os.remove(os.path.join(ckpt_out_dir, fn))
+                except OSError:
+                    pass
+        kept = [f for f in os.listdir(ckpt_out_dir)
+                if f.split("_fold")[1].split("_")[0].isdigit()
+                and int(f.split("_fold")[1].split("_")[0]) == fold]
+        print(f"  [space] kept fold-{fold} ckpt(s): {kept}")
 
     if n_gpus > 1 and not skip_train:
         trainer.strategy.barrier()
