@@ -5,7 +5,6 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, Sampler
-import scanpy as sc
 import math
 import sys
 
@@ -24,7 +23,6 @@ CKPT = "model_ckpts/lighthggep_fold6_epoch=86_val_loss=0.6360.ckpt"
 FOLD = 6
 
 class SectionBatchSampler(Sampler):
-    # (Giữ nguyên như code của bạn)
     def __init__(self, dataset, batch_size, shuffle=True):
         self.batch_size = batch_size
         self.shuffle = shuffle
@@ -51,7 +49,6 @@ class SectionBatchSampler(Sampler):
         return self.steps_per_epoch
 
 def section_collate_fn(batch):
-    # (Giữ nguyên như code của bạn)
     is_train = (len(batch[0]) == 5)
     sec_pos = 3 if is_train else 4
     section_names = [b[sec_pos] for b in batch]
@@ -81,7 +78,6 @@ def main():
     test_dataset = LightHGGEP_HER2ST(train=False, fold=FOLD, k_neighbors=K_NEIGHBORS)
     n_genes = len(test_dataset.gene_set)
     
-    # [SỬA LỖI]: Xử lý tham số --section nếu người dùng truyền vào
     target_sections = [args.section] if args.section else test_dataset.names
     print(f"  n_genes = {n_genes}, target_sections = {target_sections}")
 
@@ -104,17 +100,14 @@ def main():
                        pin_memory=torch.cuda.is_available())
 
     # --- Predict ---
-    # lighthggep_predict sẽ duyệt qua loader 1 lần
     adata_pred, adata_gt = lighthggep_predict(model, loader, device=device)
 
-    # --- Lấy patch (Trích xuất thủ công nhưng chỉ lọc ra section mong muốn) ---
-    all_patches, all_loc, all_centers = [], [], []
+    # --- Lấy patch của section cần vẽ ---
+    all_patches, all_centers = [], []
     for batch in loader:
         patch_3ch, positions, exp, centers, section_name, local_indices = batch
-        # [SỬA LỖI]: Chỉ vẽ section được yêu cầu, tránh tình trạng gom nhiều section vào 1 ảnh
         if section_name in target_sections:
             all_patches.append(patch_3ch.cpu())
-            all_loc.append(positions.cpu())
             all_centers.append(centers.cpu())
             
     if not all_patches:
@@ -122,15 +115,8 @@ def main():
         return
 
     patches = torch.cat(all_patches, dim=0).numpy()
-    locs = torch.cat(all_loc, dim=0).numpy()
-    centers = torch.cat(all_centers, dim=0).numpy()
-
-    # Lọc AnnData cho khớp số lượng spots của section
-    # AnnData thường chứa thông tin section ở adata.obs, nếu không có, vì DataLoader shuffle=False,
-    # chúng ta có thể lấy đúng số lượng spots (giả sử thư viện trả về cùng thứ tự)
+    centers = torch.cat(all_centers, dim=0).numpy()  # Sử dụng TỌA ĐỘ PIXEL THỰC TẾ
     n_spots = patches.shape[0]
-    # Lấy N_spots đầu tiên/tương ứng (Cần kiểm tra kỹ xem predict trả về ra sao, 
-    # mặc định shuffle=False nên nó sẽ map 1:1)
     
     # --- Chọn gene ---
     gene_names = list(test_dataset.gene_set)
@@ -144,44 +130,52 @@ def main():
         except (ValueError, IndexError):
             gidx, gname = 0, gene_names[0]
 
-    # Cắt lấy đúng số spot của section (Phòng hờ bộ test có nhiều section)
     pred_vals = adata_pred.X[:n_spots, gidx].astype(float)
     gt_vals = adata_gt.X[:n_spots, gidx].astype(float)
 
-    # --- [ĐÃ SỬA LỖI] Cột 1: Ghép ảnh đầu vào (Dùng Pixel hoặc Grid đúng tỷ lệ) ---
-    locs_xy = locs - locs.min(axis=0)
-    span = locs_xy.max(axis=0)  # Ví dụ (30, 32) grid
+    # =========================================================================
+    # [FIX CỐT LÕI]: Cột 1 - Ghép ảnh đầu vào dựa trên tọa độ PIXEL (centers)
+    # =========================================================================
     H, W = patches.shape[-2:]
     
-    # Kích thước khung vẽ: Số lượng grid width * Kích thước 1 patch W
-    canvas_w = int(span[0] * W + W)
-    canvas_h = int(span[1] * H + H)
-    canvas_h, canvas_w = max(canvas_h, H), max(canvas_w, W)
+    # `centers` đang là điểm trung tâm của patch. 
+    # Ta suy ra góc trên-trái (top-left) của patch bằng cách trừ đi nửa chiều dài/rộng.
+    top_lefts = centers.copy()
+    top_lefts[:, 0] -= W / 2.0
+    top_lefts[:, 1] -= H / 2.0
     
-    # Background trắng
+    # Chuẩn hóa để tọa độ nhỏ nhất bắt đầu từ (0,0) trên Canvas
+    top_lefts -= top_lefts.min(axis=0)
+    
+    # Khởi tạo Canvas trắng (Tương đương kích thước bounding box bao trọn toàn bộ patch)
+    canvas_w = int(np.ceil(top_lefts[:, 0].max() + W))
+    canvas_h = int(np.ceil(top_lefts[:, 1].max() + H))
     canvas = np.ones((canvas_h, canvas_w, 3), dtype=np.float32)
 
     mean = np.array([0.485, 0.456, 0.406]).reshape(3, 1, 1)
     std = np.array([0.229, 0.224, 0.225]).reshape(3, 1, 1)
 
-    for i in range(patches.shape[0]):
-        # Tọa độ pixel trên canvas
-        px = int(locs_xy[i, 0] * W)
-        py = int(locs_xy[i, 1] * H)
+    for i in range(n_spots):
+        px = int(top_lefts[i, 0])
+        py = int(top_lefts[i, 1])
         
-        # Unnormalize
+        # Unnormalize ImageNet -> RGB [0, 1]
         img = patches[i] * std + mean
         img = np.clip(img, 0, 1).transpose(1, 2, 0)
+        
+        # Đổ ảnh vào đúng vị trí tọa độ
         canvas[py:py + H, px:px + W] = img
 
-    # --- Vẽ 3 cột ---
+    # =========================================================================
+    # VẼ 3 CỘT
+    # =========================================================================
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
 
     axes[0].imshow(canvas)
     axes[0].set_title(f"(1) Input H&E patches\n{n_spots} spots")
     axes[0].axis("off")
 
-    # [ĐÃ SỬA LỖI]: Bỏ dấu trừ ở centers[:, 1], chỉ dùng invert_yaxis()
+    # Cột 2
     sc = axes[1].scatter(centers[:, 0], centers[:, 1], c=pred_vals, cmap="magma",
                          s=40, edgecolors="k", linewidths=0.3)
     axes[1].set_title(f"(2) Prediction: {gname}\nmean={pred_vals.mean():.3f}")
@@ -190,7 +184,7 @@ def main():
     axes[1].axis("off")
     plt.colorbar(sc, ax=axes[1], fraction=0.046, pad=0.04)
 
-    # [ĐÃ SỬA LỖI]: Bỏ dấu trừ ở centers[:, 1]
+    # Cột 3
     sc2 = axes[2].scatter(centers[:, 0], centers[:, 1], c=gt_vals, cmap="magma",
                           s=40, edgecolors="k", linewidths=0.3)
     axes[2].set_title(f"(3) Ground Truth: {gname}\nmean={gt_vals.mean():.3f}")
