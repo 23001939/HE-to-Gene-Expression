@@ -166,6 +166,7 @@ def main():
     else:
         img_path = find_image_path(args.img_dir, current_section)
 
+    orig_img = None
     if img_path:
         print(f"Loaded original image: {img_path}")
         orig_img = Image.open(img_path)
@@ -179,18 +180,25 @@ def main():
     axes[0].axis("off")
 
     # =========================================================================
-    # VẼ CỘT 2 VÀ CỘT 3
+    # VẼ CỘT 2 VÀ CỘT 3 (ĐÈ LÊN ẢNH GỐC)
     # =========================================================================
     # Cột 2
+    if orig_img is not None:
+        axes[1].imshow(orig_img) # Chèn ảnh nền
+    
+    # alpha=0.8 giúp các chấm hơi trong suốt để thấy được mô nền
     sc = axes[1].scatter(centers[:, 0], centers[:, 1], c=pred_vals, cmap="magma",
-                         s=40, edgecolors="k", linewidths=0.3)
+                         s=40, edgecolors="k", linewidths=0.3, alpha=0.8)
     axes[1].set_title(f"(2) Prediction: {gname}\nmean={pred_vals.mean():.3f}")
     axes[1].axis("off")
     plt.colorbar(sc, ax=axes[1], fraction=0.046, pad=0.04)
 
     # Cột 3
+    if orig_img is not None:
+        axes[2].imshow(orig_img) # Chèn ảnh nền
+        
     sc2 = axes[2].scatter(centers[:, 0], centers[:, 1], c=gt_vals, cmap="magma",
-                          s=40, edgecolors="k", linewidths=0.3)
+                          s=40, edgecolors="k", linewidths=0.3, alpha=0.8)
     axes[2].set_title(f"(3) Ground Truth: {gname}\nmean={gt_vals.mean():.3f}")
     axes[2].axis("off")
     plt.colorbar(sc2, ax=axes[2], fraction=0.046, pad=0.04)
