@@ -26,6 +26,8 @@ import random
 import time
 import numpy as np
 import torch
+import pandas as pd
+import matplotlib.pyplot as plt
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -739,10 +741,8 @@ def run_fold(fold):
     # ============================================================================
     # ---- Cell 29 (notebook gốc) ----
     # ============================================================================
-    import matplotlib.pyplot as plt
-
     # K-means clusters
-    sc.pl.spatial(adata_pred, img=None, color="kmeans", spot_size=112, 
+    sc.pl.spatial(adata_pred, img=None, color="kmeans", spot_size=112,
                   frameon=False, legend_loc=None, title=None, show=False)
     plt.gca().set_title("")
     plt.savefig(f"figures/kmeans/Light-HGGEP_kmeans_fold{fold}.png", dpi=300, bbox_inches="tight", transparent=True)
@@ -763,7 +763,6 @@ def run_fold(fold):
     # ============================================================================
     # ---- Cell 31 (notebook gốc) ----
     # ============================================================================
-    import pandas as pd
 
     results = pd.DataFrame([{
         'model':          'Light-HGGEP',
@@ -818,8 +817,6 @@ def run_fold(fold):
 # ============================================================================
 # ---- [K-FOLD] Driver: loop qua FOLD_LIST, gop ket qua ----
 # ============================================================================
-import pandas as pd
-
 ALL_RESULTS = []
 for _fold in FOLD_LIST:
     print("\n" + "=" * 70)
