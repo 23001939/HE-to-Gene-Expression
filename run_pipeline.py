@@ -533,12 +533,15 @@ def run_fold(fold):
     from evaluation import PROTOCOL_NAME, evaluate_her2st_predictions
     label = test_dataset.label[test_dataset.names[0]]
     if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats(device)
         torch.cuda.synchronize()
     _t0 = time.perf_counter()
     adata_pred, adata_gt = lighthggep_predict(best_model, test_loader, device=device)
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     inference_time_total_s = time.perf_counter() - _t0
+    peak_inference_memory_mb = (torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+                                 if torch.cuda.is_available() else float('nan'))
 
     # Common fair evaluation: metrics are always computed on raw log-normalised
     # expression.  Only the visualisation/clustering copy is standardised.
@@ -561,6 +564,7 @@ def run_fold(fold):
     inference_time_per_spot_ms = 1000.0 * inference_time_total_s / max(n_spots, 1)
     print(f"  [INFER TIME] total={inference_time_total_s:.3f}s "
           f"({n_spots} spot) -> {inference_time_per_spot_ms:.3f} ms/spot")
+    print(f"  [PEAK MEM]   {peak_inference_memory_mb:.1f} MB")
     mean_pcc      = metrics['pearson']
     median_pcc    = metrics['median_pearson']
     std_pcc       = np.nanstd(R)
@@ -687,6 +691,7 @@ def run_fold(fold):
         'params':         total_params,
         'inference_time_total_s':     inference_time_total_s,
         'inference_time_per_spot_ms': inference_time_per_spot_ms,
+        'peak_inference_memory_mb':   peak_inference_memory_mb,
         'n_test_spots':   n_spots,
         'best_val_loss':  float(checkpoint_callback.best_model_score),
         'eval_protocol':  PROTOCOL_NAME,
