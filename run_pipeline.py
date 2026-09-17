@@ -169,8 +169,12 @@ _p.add_argument('--fold-start', type=int, default=0,
                 help="Fold dau tien (inclusive). Mac dinh 0.")
 _p.add_argument('--fold-end', type=int, default=5,
                 help="Fold cuoi (exclusive). Mac dinh 5 = 5-fold LOOCV (fold 0..4).")
+_p.add_argument('--skip-train', action='store_true',
+                help="Bo qua huan luyen, dung model vua khoi tao de do peak memory / "
+                     "thoi gian suy luan (KHONG dung cot pearson/rmse... cua fold nay).")
 _args = _p.parse_args()
 DATASET = _args.datasets
+SKIP_TRAIN = _args.skip_train
 N_GENES = None  # tu dong lay tu dataset gene_set neu de None
 MAX_EPOCHS = 100
 PATIENCE = 15
@@ -485,32 +489,41 @@ def run_fold(fold):
         enable_model_summary=False,     # Tắt bảng tóm tắt model
     )
 
-    # Train
-    trainer.fit(model, train_loader, val_loader)
+    if not SKIP_TRAIN:
+        # Train
+        trainer.fit(model, train_loader, val_loader)
 
-    # Only rank zero performs the single canonical test evaluation and writes files.
-    trainer.strategy.barrier()
-    if not trainer.is_global_zero:
+        # Only rank zero performs the single canonical test evaluation and writes files.
         trainer.strategy.barrier()
-        raise SystemExit(0)
+        if not trainer.is_global_zero:
+            trainer.strategy.barrier()
+            raise SystemExit(0)
 
-    # Load best checkpoint
-    best_ckpt_path = checkpoint_callback.best_model_path
-    print(f"\nBest checkpoint: {best_ckpt_path}")
-    print(f"Best validation loss: {checkpoint_callback.best_model_score:.4f}")
+        # Load best checkpoint
+        best_ckpt_path = checkpoint_callback.best_model_path
+        print(f"\nBest checkpoint: {best_ckpt_path}")
+        print(f"Best validation loss: {checkpoint_callback.best_model_score:.4f}")
 
-    # ----- Cell 27 (notebook gốc): predict + evaluate -----
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # ----- Cell 27 (notebook gốc): predict + evaluate -----
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # Load best model
-    best_model = LightHGGEP.load_from_checkpoint(
-        best_ckpt_path,
-        n_genes=N_GENES,
-        k_neighbors=K_NEIGHBORS,
-        learning_rate=LEARNING_RATE,
-        max_epochs=MAX_EPOCHS,
-        cnn_chunk=BATCH_SIZE
-    )
+        # Load best model
+        best_model = LightHGGEP.load_from_checkpoint(
+            best_ckpt_path,
+            n_genes=N_GENES,
+            k_neighbors=K_NEIGHBORS,
+            learning_rate=LEARNING_RATE,
+            max_epochs=MAX_EPOCHS,
+            cnn_chunk=BATCH_SIZE
+        )
+    else:
+        # [MỚI] Chỉ đo peak memory / thời gian suy luận: dùng đúng kiến trúc + đúng
+        # shape dữ liệu thật, KHÔNG train. Bộ nhớ đỉnh và thời gian forward không phụ
+        # thuộc giá trị trọng số, chỉ phụ thuộc kiến trúc và shape tensor.
+        print("  [SKIP-TRAIN] Dung model vua khoi tao (chua train) de do memory/toc do.")
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        best_model = model
+        checkpoint_callback.best_model_score = float('nan')
 
     # Set graph cho model (cho test set)
     test_dataset = DATASET_CLASS(train=False, fold=FOLD, k_neighbors=K_NEIGHBORS)
@@ -745,7 +758,7 @@ results = pd.DataFrame(all_rows)
 # [SỬA ghi đè] Append an toàn: giữ các fold cũ trong CSV, chỉ nối fold mới (xóa trùng
 # theo cột 'fold'), để chạy lẻ từng fold (vd --fold-start 5 --fold-end 6) không mất
 # kết quả các fold đã chạy trước đó. Khớp logic append của run_baselines.py.
-summary_csv = "Light-HGGEP_results.csv"
+summary_csv = "Light-HGGEP_memoryprofile.csv" if SKIP_TRAIN else "Light-HGGEP_results.csv"
 if os.path.isfile(summary_csv):
     old = pd.read_csv(summary_csv)
     old = old[~old["fold"].isin(results["fold"])]
