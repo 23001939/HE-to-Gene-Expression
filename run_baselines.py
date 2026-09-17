@@ -488,6 +488,7 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
     inference_time_per_spot_ms = 1000.0 * inference_time_total_s / max(n_test_spots, 1)
     print(f"  [INFER TIME] total={inference_time_total_s:.3f}s "
           f"({n_test_spots} spot) -> {inference_time_per_spot_ms:.3f} ms/spot")
+    print(f"  [PEAK MEM]   {peak_inference_memory_mb:.1f} MB")
 
     # ── Common, fair evaluation ───────────────────────────────────────────────
     g = list(np.load("data/her_hvg_cut_1000.npy", allow_pickle=True))
