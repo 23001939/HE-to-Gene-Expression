@@ -424,8 +424,9 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
             torch.cuda.empty_cache()
 
     else:
-        if ckpt_path is None:
-            raise ValueError(f"--skip_train yêu cầu --ckpt_path cho mode={mode}")
+        # [MỚI] Không có --ckpt_path -> dùng model vừa khởi tạo (chưa train) để đo
+        # peak memory / thời gian suy luận -- không phụ thuộc giá trị trọng số.
+        pass
 
     # Every DDP rank trains; only rank zero may perform the canonical inference
     # and write CSV/figures.  Other ranks wait so modes stay in lockstep.
@@ -442,9 +443,14 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
     label        = test_dataset.label[test_dataset.names[0]]
 
     if mode == "histogene":
-        m = HisToGene.load_from_checkpoint(
-            ckpt_path, patch_size=112, n_layers=8, n_genes=n_genes,
-            learning_rate=lr, max_epochs=max_ep)
+        if ckpt_path is not None:
+            m = HisToGene.load_from_checkpoint(
+                ckpt_path, patch_size=112, n_layers=8, n_genes=n_genes,
+                learning_rate=lr, max_epochs=max_ep)
+        else:
+            print("  [SKIP-TRAIN, no ckpt] Dung model vua khoi tao (chua train).")
+            m = HisToGene(patch_size=112, n_layers=8, n_genes=n_genes,
+                          learning_rate=lr, max_epochs=max_ep)
         test_loader = DataLoader(test_dataset, batch_size=1,
                                  shuffle=False, **eval_loader_options)
         if torch.cuda.is_available():
@@ -459,8 +465,12 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
                                      if torch.cuda.is_available() else float('nan'))
 
     elif mode == "stnet":
-        m = STModel.load_from_checkpoint(
-            ckpt_path, n_genes=n_genes, learning_rate=lr, max_epochs=max_ep)
+        if ckpt_path is not None:
+            m = STModel.load_from_checkpoint(
+                ckpt_path, n_genes=n_genes, learning_rate=lr, max_epochs=max_ep)
+        else:
+            print("  [SKIP-TRAIN, no ckpt] Dung model vua khoi tao (chua train).")
+            m = STModel(n_genes=n_genes, learning_rate=lr, max_epochs=max_ep)
         test_loader = DataLoader(test_dataset, batch_size=bs,
                                  shuffle=False, **eval_loader_options)
         if torch.cuda.is_available():
@@ -572,7 +582,7 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
         "precision":     "16-mixed" if torch.cuda.is_available() else "32-true",
     }
 
-    summary_csv = "baselines_results.csv"
+    summary_csv = "baselines_memoryprofile.csv" if skip_train else "baselines_results.csv"
     new_row = pd.DataFrame([result])
     if os.path.isfile(summary_csv):
         existing = pd.read_csv(summary_csv)
