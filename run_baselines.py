@@ -448,12 +448,15 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
         test_loader = DataLoader(test_dataset, batch_size=1,
                                  shuffle=False, **eval_loader_options)
         if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(device)
             torch.cuda.synchronize()
         _t0 = time.perf_counter()
         adata_pred, adata_gt = histogene_predict(m, test_loader, device=device)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         inference_time_total_s = time.perf_counter() - _t0
+        peak_inference_memory_mb = (torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+                                     if torch.cuda.is_available() else float('nan'))
 
     elif mode == "stnet":
         m = STModel.load_from_checkpoint(
@@ -461,12 +464,15 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
         test_loader = DataLoader(test_dataset, batch_size=bs,
                                  shuffle=False, **eval_loader_options)
         if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(device)
             torch.cuda.synchronize()
         _t0 = time.perf_counter()
         adata_pred, adata_gt = stnet_predict(m, test_loader, device=device)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         inference_time_total_s = time.perf_counter() - _t0
+        peak_inference_memory_mb = (torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+                                     if torch.cuda.is_available() else float('nan'))
 
     n_test_spots = adata_pred.shape[0]
     inference_time_per_spot_ms = 1000.0 * inference_time_total_s / max(n_test_spots, 1)
@@ -550,6 +556,7 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
         "params":        total_params,
         "inference_time_total_s":   inference_time_total_s,
         "inference_time_per_spot_ms": inference_time_per_spot_ms,
+        "peak_inference_memory_mb": peak_inference_memory_mb,
         "n_test_spots":  n_test_spots,
         "ckpt":          ckpt_path,
         "eval_protocol": PROTOCOL_NAME,
