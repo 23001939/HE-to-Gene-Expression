@@ -172,6 +172,9 @@ _p.add_argument('--fold-end', type=int, default=5,
 _p.add_argument('--skip-train', action='store_true',
                 help="Bo qua huan luyen, dung model vua khoi tao de do peak memory / "
                      "thoi gian suy luan (KHONG dung cot pearson/rmse... cua fold nay).")
+_p.add_argument('--cnn-chunk', type=int, default=None,
+                help="So patch xu ly dong thoi qua CNN (Stage1-3). Mac dinh = BATCH_SIZE "
+                     "neu khong truyen. Giam gia tri nay de giam peak memory.")
 _args = _p.parse_args()
 DATASET = _args.datasets
 SKIP_TRAIN = _args.skip_train
@@ -181,6 +184,7 @@ PATIENCE = 15
 LEARNING_RATE = 1e-4
 K_NEIGHBORS = 4
 BATCH_SIZE = 32  # Light-HGGEP rat nhe nen co the tang batch size
+CNN_CHUNK = _args.cnn_chunk if _args.cnn_chunk is not None else BATCH_SIZE
 NUM_WORKERS = 2  # per DDP rank (4 loader workers total with 2 GPUs)
 
 CKPT_DIR = "model_ckpts"
@@ -461,7 +465,7 @@ def run_fold(fold):
         k_neighbors=K_NEIGHBORS,
         learning_rate=LEARNING_RATE,
         max_epochs=MAX_EPOCHS,
-        cnn_chunk=BATCH_SIZE,
+        cnn_chunk=CNN_CHUNK,
     )
 
     # Set graph cho model
@@ -541,7 +545,7 @@ def run_fold(fold):
             k_neighbors=K_NEIGHBORS,
             learning_rate=LEARNING_RATE,
             max_epochs=MAX_EPOCHS,
-            cnn_chunk=BATCH_SIZE
+            cnn_chunk=CNN_CHUNK
         )
     else:
         # [MỚI] Chỉ đo peak memory / thời gian suy luận: dùng đúng kiến trúc + đúng
@@ -738,6 +742,7 @@ def run_fold(fold):
         'inference_time_total_s':     inference_time_total_s,
         'inference_time_per_spot_ms': inference_time_per_spot_ms,
         'peak_inference_memory_mb':   peak_inference_memory_mb,
+        'cnn_chunk':      CNN_CHUNK,
         'n_test_spots':   n_spots,
         'best_val_loss':  float(checkpoint_callback.best_model_score),
         'eval_protocol':  PROTOCOL_NAME,
@@ -791,7 +796,8 @@ results = pd.DataFrame(all_rows)
 # [SỬA ghi đè] Append an toàn: giữ các fold cũ trong CSV, chỉ nối fold mới (xóa trùng
 # theo cột 'fold'), để chạy lẻ từng fold (vd --fold-start 5 --fold-end 6) không mất
 # kết quả các fold đã chạy trước đó. Khớp logic append của run_baselines.py.
-summary_csv = "Light-HGGEP_memoryprofile.csv" if SKIP_TRAIN else "Light-HGGEP_results.csv"
+summary_csv = (f"Light-HGGEP_memoryprofile_chunk{CNN_CHUNK}.csv" if SKIP_TRAIN
+               else "Light-HGGEP_results.csv")
 if os.path.isfile(summary_csv):
     old = pd.read_csv(summary_csv)
     old = old[~old["fold"].isin(results["fold"])]
