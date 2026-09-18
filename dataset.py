@@ -242,12 +242,17 @@ class LightHGGEP_HER2ST(torch.utils.data.Dataset):
             'cancer in situ': 3, 'connective tissue': 4, 'adipose tissue': 5, 'undetermined': -1
         }
         
-        if not train and self.names[0] in ['A1', 'B1', 'C1', 'D1', 'E1', 'F1', 'G2', 'H1', 'J1']:
-            self.lbl_dict = {i: self.get_lbl(i) for i in self.names}
-            idx = self.meta_dict[self.names[0]].index
-            lbl = self.lbl_dict[self.names[0]]
-            lbl = lbl.loc[idx, :]['label'].values
-            self.label[self.names[0]] = lbl
+        if not train:
+            # Fix cho LOPO: Duyệt qua từng slide trong tập test độc lập
+            for i in self.names:
+                idx = self.meta_dict[i].index
+                # Chỉ đọc file label nếu slide thực sự có nhãn
+                if i in ['A1', 'B1', 'C1', 'D1', 'E1', 'F1', 'G2', 'H1', 'J1']:
+                    lbl_df = self.get_lbl(i)
+                    self.label[i] = lbl_df.loc[idx, :]['label'].values
+                else:
+                    # Các slide không có ground-truth label (như A2, A3...) được gán 'undetermined'
+                    self.label[i] = np.full(len(idx), 'undetermined')
         elif train:
             for i in self.names:
                 idx = self.meta_dict[i].index
