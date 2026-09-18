@@ -206,10 +206,21 @@ class LightHGGEP_HER2ST(torch.utils.data.Dataset):
         gene_list = self.gene_list
         self.train = train
         
-        # LOOCV split (giống ViT_HER2ST)
-        samples = self.names[1:33]
-        te_names = [samples[fold]]
-        tr_names = list(set(samples) - set(te_names))
+        # Leave-One-Patient-Out (LOPO) split
+        samples = self.names # Giữ nguyên danh sách mẫu hợp lệ của bạn
+        
+        # Trích xuất danh sách các bệnh nhân duy nhất (ký tự đầu tiên của chuỗi, vd: 'A', 'B', 'C'...)
+        patients = sorted(list(set([name[0] for name in samples])))
+        
+        # Lấy tên bệnh nhân cho tập Test dựa vào biến fold
+        # Dùng phép chia lấy dư (%) để tránh lỗi index out of range nếu fold truyền vào lớn hơn số bệnh nhân
+        test_patient = patients[fold % len(patients)]
+        
+        # Tách tập Test (tất cả các lát cắt của bệnh nhân test) và Train (các bệnh nhân còn lại)
+        te_names = [name for name in samples if name[0] == test_patient]
+        tr_names = [name for name in samples if name[0] != test_patient]
+        
+        print(f"LOPO Split - Bệnh nhân Test: {test_patient} | Số mẫu Test: {len(te_names)} | Số mẫu Train: {len(tr_names)}")
         
         if train:
             self.names = tr_names
