@@ -378,6 +378,28 @@ class LightHGGEP_HER2ST(torch.utils.data.Dataset):
     def __len__(self):
         return self.cumlen[-1]
     
+    def get_test_labels(self): 
+        """Label cho toan bo spot cua tap test, theo dung thu tu section trong self.names.
+
+        Voi LOPO, test_loader (shuffle=False, full_section=True) xuat batch theo dung
+        thu tu self.names, moi section 1 batch, va lighthggep_predict concat lai theo
+        thu tu do. Ham nay tra ve label cung thu tu -> khop do dai voi adata_pred, thay
+        vi chi lay label cua names[0] nhu truoc (gay lech do dai khi benh nhan test co
+        nhieu slide). Section khong co ground-truth duoc danh 'undetermined' de
+        cluster_with_nmi tu dong bo qua.
+        """
+        parts = []
+    
+        for name in self.names:
+            lab = self.label.get(name)
+            if lab is None:
+                lab = np.full(len(self.meta_dict[name]), 'undetermined')
+            parts.append(np.asarray(lab))
+        
+        if not parts:
+            return None
+        return np.concatenate(parts)
+
     def get_img(self, name):
         return Image.open(self.get_img_path(name)).convert("RGB")
 

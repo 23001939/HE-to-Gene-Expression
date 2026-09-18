@@ -581,7 +581,7 @@ def run_fold(fold):
     # Predict
     from predict import lighthggep_predict
     from evaluation import PROTOCOL_NAME, evaluate_her2st_predictions
-    label = test_dataset.label[test_dataset.names[0]]
+    label = test_dataset.get_test_labels()
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats(device)
         torch.cuda.synchronize()
