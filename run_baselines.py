@@ -440,7 +440,10 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     test_dataset = HER2ST(train=False, fold=fold)
-    label        = test_dataset.label[test_dataset.names[0]]
+    # [LOPO] test có thể gồm nhiều slide của cùng bệnh nhân → gộp label toàn bộ
+    # theo đúng thứ tự self.names để khớp độ dài adata_pred (như LightHGGEP).
+    # Slide không có ground-truth được gán 'undetermined' để cluster tự bỏ qua.
+    label        = test_dataset.get_test_labels()
 
     if mode == "histogene":
         if ckpt_path is not None:

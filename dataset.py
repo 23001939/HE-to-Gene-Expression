@@ -40,9 +40,22 @@ class HER2ST(torch.utils.data.Dataset):
         self.names.sort()  
         self.names = [i[:2] for i in self.names]
         self.train = train
-        samples = self.names[1:33]
-        te_names = [samples[fold]]
-        tr_names = list(set(samples)-set(te_names))
+        # Leave-One-Patient-Out (LOPO) split
+        samples = self.names # Giữ nguyên danh sách mẫu hợp lệ của bạn
+
+        # Trích xuất danh sách các bệnh nhân duy nhất (ký tự đầu tiên của chuỗi, vd: 'A', 'B', 'C'...)
+        patients = sorted(list(set([name[0] for name in samples])))
+
+        # Lấy tên bệnh nhân cho tập Test dựa vào biến fold
+        # Dùng phép chia lấy dư (%) để tránh lỗi index out of range nếu fold truyền vào lớn hơn số bệnh nhân
+        test_patient = patients[fold % len(patients)]
+
+        # Tách tập Test (tất cả các lát cắt của bệnh nhân test) và Train (các bệnh nhân còn lại)
+        te_names = [name for name in samples if name[0] == test_patient]
+        tr_names = [name for name in samples if name[0] != test_patient]
+
+        print(f"LOPO Split - Bệnh nhân Test: {test_patient} | Số mẫu Test: {len(te_names)} | Số mẫu Train: {len(tr_names)}")
+
         if train:
             self.names = tr_names
         else:
@@ -114,6 +127,24 @@ class HER2ST(torch.utils.data.Dataset):
             return patch, loc, exp, torch.Tensor(center)
     def __len__(self):
         return self.cumlen[-1]
+    def get_test_labels(self):
+        """Label cho toan bo spot cua tap test, theo dung thu tu section trong self.names.
+
+        Voi LOPO, test_set co the gom NHIEU slide cua cung 1 benh nhan. Dataset test
+        tra spot theo thu tu self.names (section 1) roi section 2... nen label phai
+        gop theo dung thu tu do de khop do dai voi adata_pred (concat cua predict).
+        Section khong co ground-truth duoc danh 'undetermined' de cluster_with_nmi
+        tu dong bo qua.
+        """
+        parts = []
+        for name in self.names:
+            lab = self.label.get(name)
+            if lab is None:
+                lab = np.full(len(self.meta_dict[name]), 'undetermined')
+            parts.append(np.asarray(lab))
+        if not parts:
+            return None
+        return np.concatenate(parts)
     def get_img(self,name):
         return Image.open(self.get_img_path(name)).convert("RGB")
 
