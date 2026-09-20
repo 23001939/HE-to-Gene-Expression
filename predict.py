@@ -123,7 +123,29 @@ def get_Spearman(data1, data2, dim=1):
     return np.array(rho_list), np.array(p_list)
 
 
-def get_MoransI(adata, gene_idx, spatial_key='spatial'):
+def get_section_ids(dataset):
+    """[MỚI - sửa lỗi Moran's I đa lát cắt]
+    Trả về mảng section_name (str) cho từng spot, ĐÚNG THỨ TỰ global index
+    0..N-1 mà dataset.__getitem__ trả về (tức đúng thứ tự mà stnet_predict /
+    histogene_predict / lighthggep_predict nối các batch lại bằng torch.cat),
+    miễn là DataLoader/SectionBatchSampler chạy với shuffle=False (luôn đúng
+    cho test_loader trong run_pipeline.py và run_baselines.py).
+
+    Dùng dataset.lengths và dataset.id2name (đã có sẵn trong cả HER2ST và
+    LightHGGEP_HER2ST, xem dataset.py) -- không cần sửa gì bên trong 3 hàm
+    predict, chỉ cần build mảng này 1 lần ở nơi gọi evaluate_her2st_predictions
+    rồi truyền vào.
+
+    Ví dụ: section A có 300 spot, section B có 250 spot
+        -> trả về ['A']*300 + ['B']*250  (list[str] length 550)
+    """
+    ids = []
+    for name, length in zip(dataset.id2name.values(), dataset.lengths):
+        ids.extend([name] * length)
+    return np.array(ids)
+
+
+def get_MoransI(adata, gene_idx, spatial_key='spatial', section_ids=None):
     """
     Tính Moran's I cho 1 gene trên toàn bộ spot, dùng tọa độ spatial làm
     weight matrix (inverse distance, cắt tại K=6 láng giềng gần nhất).
@@ -139,44 +161,84 @@ def get_MoransI(adata, gene_idx, spatial_key='spatial'):
         adata      : AnnData với adata.X shape (N, G) và adata.obsm[spatial_key] shape (N, 2)
         gene_idx   : chỉ số gene (int) hoặc tên gene (str) trong adata.var_names
         spatial_key: key trong obsm chứa tọa độ (x, y)
+        section_ids: [MỚI] None hoặc array/list[str] độ dài N, section_name của từng spot
+                     (lấy từ get_section_ids(dataset), CÙNG THỨ TỰ với adata).
+                     - None (mặc định): giữ nguyên hành vi CŨ -- build 1 đồ thị K-NN trên
+                       TOÀN BỘ N spot, ĐÚNG khi adata chỉ chứa 1 lát cắt (fold kiểu
+                       Leave-One-Slide-Out cũ). SAI khi adata gộp nhiều lát cắt (LOPO
+                       hiện tại), vì sẽ nối "láng giềng" giữa các spot ở 2 lát mô KHÁC
+                       NHAU chỉ vì toạ độ pixel của chúng tình cờ gần nhau -- các lát HER2ST
+                       đều có toạ độ lưới bắt đầu từ ~0 nên rất dễ trùng khoảng giá trị.
+                     - Có giá trị: build đồ thị K-NN RIÊNG cho từng section (chỉ nối láng
+                       giềng trong cùng 1 lát cắt), tính Moran's I riêng từng section, rồi
+                       lấy TRUNG BÌNH các section hợp lệ (bỏ qua section có N<2 spot).
+                       Đây là cách bắt buộc phải dùng khi test set của 1 fold có nhiều
+                       lát cắt (patient-level split / LOPO).
     """
     from sklearn.metrics.pairwise import pairwise_distances
 
-    coords = adata.obsm[spatial_key].astype(float)   # (N, 2)
+    def _morans_i_single_block(coords, x):
+        """Moran's I trên 1 khối toạ độ liền mạch (1 lát cắt, hoặc toàn bộ nếu không
+        chia section). Giữ nguyên công thức gốc, chỉ tách ra để tái dùng cho cả 2 nhánh."""
+        N = len(x)
+        if N < 3:          # cần it nhat vai spot moi co y nghia thong ke
+            return float('nan')
+        x_dev = x - x.mean()
+
+        D = pairwise_distances(coords, metric='euclidean')
+        K = min(6, N - 1)
+        W = np.zeros((N, N), dtype=float)
+        for i in range(N):
+            order = np.argsort(D[i])
+            neighbors = order[order != i][:K]
+            for j in neighbors:
+                W[i, j] = 1.0 / (D[i, j] + 1e-8)
+
+        W_sum = W.sum()
+        if W_sum == 0:
+            return float('nan')
+        denominator = W_sum * np.sum(x_dev ** 2)
+        if denominator == 0:
+            return float('nan')
+        numerator = N * np.sum(W * np.outer(x_dev, x_dev))
+        return numerator / denominator
+
+    coords_all = adata.obsm[spatial_key].astype(float)   # (N, 2)
     if isinstance(gene_idx, str):
         gene_idx = list(adata.var_names).index(gene_idx)
-    x = adata.X[:, gene_idx].astype(float)           # (N,)
+    x_all = adata.X[:, gene_idx].astype(float)           # (N,)
 
-    N = len(x)
-    x_mean = x.mean()
-    x_dev = x - x_mean
+    if section_ids is None:
+        # Hành vi CŨ -- CHỈ dùng khi chắc chắn adata là 1 lát cắt duy nhất.
+        return _morans_i_single_block(coords_all, x_all)
 
-    # Build K-NN weight matrix (K=6, inverse distance)
-    D = pairwise_distances(coords, metric='euclidean')
-    K = min(6, N - 1)
-    W = np.zeros((N, N), dtype=float)
-    for i in range(N):
-        order = np.argsort(D[i])
-        neighbors = order[order != i][:K]
-        for j in neighbors:
-            W[i, j] = 1.0 / (D[i, j] + 1e-8)
+    section_ids = np.asarray(section_ids)
+    if len(section_ids) != len(x_all):
+        raise ValueError(
+            f"get_MoransI: len(section_ids)={len(section_ids)} != N spot trong adata="
+            f"{len(x_all)}. Kiem tra lai get_section_ids(dataset) co dung dataset/thu tu "
+            f"voi adata dang truyen vao khong.")
 
-    W_sum = W.sum()
-    if W_sum == 0:
+    # [MỚI] Tính riêng từng section, không cho láng giềng xuyên lát cắt.
+    per_section_values = []
+    for name in np.unique(section_ids):
+        mask = section_ids == name
+        val = _morans_i_single_block(coords_all[mask], x_all[mask])
+        if not np.isnan(val):
+            per_section_values.append(val)
+
+    if len(per_section_values) == 0:
         return float('nan')
-
-    numerator   = N * np.sum(W * np.outer(x_dev, x_dev))
-    denominator = W_sum * np.sum(x_dev ** 2)
-    if denominator == 0:
-        return float('nan')
-
-    return numerator / denominator
+    return float(np.mean(per_section_values))
 
 
-def get_MoransI_all(data_pred, data_gt, top_k=50, spatial_key='spatial'):
+def get_MoransI_all(data_pred, data_gt, top_k=50, spatial_key='spatial', section_ids=None):
     """
     Tính Moran's I cho cả pred lẫn gt trên top_k gene có variance cao nhất
     (tính trên gt để chọn gene thú vị về mặt sinh học).
+
+    section_ids: [MỚI] xem docstring get_MoransI(). Bắt buộc truyền khi data_pred/data_gt
+        gộp nhiều lát cắt (LOPO); None nếu chỉ 1 lát cắt (hành vi cũ).
 
     Trả về dict:
         {
@@ -191,8 +253,8 @@ def get_MoransI_all(data_pred, data_gt, top_k=50, spatial_key='spatial'):
 
     mi_pred, mi_gt = [], []
     for idx in top_indices:
-        mi_pred.append(get_MoransI(data_pred, idx, spatial_key))
-        mi_gt.append(get_MoransI(data_gt,   idx, spatial_key))
+        mi_pred.append(get_MoransI(data_pred, idx, spatial_key, section_ids=section_ids))
+        mi_gt.append(get_MoransI(data_gt,   idx, spatial_key, section_ids=section_ids))
 
     return {
         'pred':         np.array(mi_pred),
