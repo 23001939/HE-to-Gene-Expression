@@ -33,10 +33,10 @@ def evaluate_her2st_predictions(adata_pred, adata_gt, genes, label=None,
 
     adata_pred.var_names = genes
     adata_gt.var_names = genes
-    R, p_values = get_R(adata_pred, adata_gt)
-    Spearman, spearman_pvalues = get_Spearman(adata_pred, adata_gt)
-    MSE = get_MSE(adata_pred, adata_gt)
-    MAE = get_MAE(adata_pred, adata_gt)
+    R, p_values = get_R(adata_pred, adata_gt, section_ids=section_ids)
+    Spearman, spearman_pvalues = get_Spearman(adata_pred, adata_gt, section_ids=section_ids)
+    MSE = get_MSE(adata_pred, adata_gt, section_ids=section_ids)
+    MAE = get_MAE(adata_pred, adata_gt, section_ids=section_ids)
     RMSE = np.sqrt(MSE)
     morans = get_MoransI_all(adata_pred, adata_gt, top_k=50, section_ids=section_ids)
 
