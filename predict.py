@@ -49,15 +49,67 @@ def lighthggep_predict(model, test_loader, device=torch.device('cpu')):
     
     return adata, adata_gt
 
-def get_R(data1,data2,dim=1,func=pearsonr):
+def _per_section_average(v1, v2, section_ids, stat_func):
+    """[MỚI - đồng bộ với per-section Moran's I] Tính stat_func(v1_sub, v2_sub) RIÊNG
+    cho từng lát cắt trong section_ids, rồi lấy TRUNG BÌNH các lát hợp lệ.
+
+    Lý do cần hàm này: khi 1 fold test gồm nhiều lát cắt của cùng 1 bệnh nhân (LOPO),
+    gộp toàn bộ spot rồi tính 1 lần (pooled) cho ra kết quả LỆCH so với tính riêng từng
+    lát rồi trung bình -- vì 2 nguyên nhân:
+      (1) Với MSE/MAE: pooled = trung bình CÓ TRỌNG SỐ theo số spot mỗi lát (lát nhiều
+          spot lấn át lát ít spot), còn per-section-average coi mỗi lát nặng NGANG NHAU.
+      (2) Với Pearson/Spearman: pooled bị ảnh hưởng bởi CHÊNH LỆCH BASELINE biểu hiện
+          gen giữa các lát cắt (khác biệt nhuộm màu, độ dày mô...) -- kiểu Nghịch lý
+          Simpson: tương quan gộp có thể CAO hoặc THẤP hơn hẳn tương quan thật sự bên
+          trong từng lát, dù model không hề dự đoán tốt/tệ hơn thực chất.
+
+    Tham số:
+        v1, v2      : mảng 1-D cùng độ dài N (giá trị của 1 gene, N spot)
+        section_ids : mảng N phần tử, section_name của từng spot (đúng thứ tự với v1, v2)
+        stat_func   : hàm nhận (v1_sub, v2_sub) -> trả về 1 số float (KHÔNG phải tuple).
+                      Với pearsonr/spearmanr (trả tuple (r, p)), phải bọc lại kiểu
+                      `lambda a, b: pearsonr(a, b)[0]` trước khi truyền vào đây.
+    Trả về: (gia_tri_trung_binh, so_lat_hop_le)
+    """
+    vals = []
+    for name in np.unique(section_ids):
+        mask = section_ids == name
+        if mask.sum() < 2:          # can it nhat 2 spot moi tinh duoc tuong quan/loi
+            continue
+        v1_sub, v2_sub = v1[mask], v2[mask]
+        try:
+            val = stat_func(v1_sub, v2_sub)
+        except Exception:
+            val = float('nan')
+        if val is not None and not (isinstance(val, float) and np.isnan(val)):
+            vals.append(val)
+    if len(vals) == 0:
+        return float('nan'), 0
+    return float(np.mean(vals)), len(vals)
+
+
+def get_R(data1,data2,dim=1,func=pearsonr,section_ids=None):
+    """
+    section_ids: [MỚI] None (mặc định) -> hành vi CŨ, gộp toàn bộ N spot rồi tính 1 lần
+        cho mỗi gene (pooled). Có giá trị -> tính riêng từng lát cắt rồi trung bình
+        (per-section average), tránh bị thổi phồng/lệch bởi chênh lệch baseline giữa
+        các lát hoặc số spot không đều nhau khi 1 fold gồm nhiều lát cắt (LOPO).
+        p-value vẫn luôn tính theo kiểu pooled (chỉ mang tính tham khảo).
+    """
     adata1=data1.X
     adata2=data2.X
     r1,p1=[],[]
     for g in range(data1.shape[dim]):
         if dim==1:
-            r,pv=func(adata1[:,g],adata2[:,g])
+            col1, col2 = adata1[:,g], adata2[:,g]
         elif dim==0:
-            r,pv=func(adata1[g,:],adata2[g,:])
+            col1, col2 = adata1[g,:], adata2[g,:]
+        _, pv = func(col1, col2)   # p-value: giữ pooled, chỉ để tham khảo
+        if section_ids is None:
+            r, _ = func(col1, col2)
+        else:
+            r, _n_valid = _per_section_average(col1, col2, section_ids,
+                                                lambda a, b: func(a, b)[0])
         r1.append(r)
         p1.append(pv)
     r1=np.array(r1)
@@ -77,47 +129,72 @@ def cluster(adata,label):
     adata.obs['kmeans']=lbl
     return p,round(ari_score(p,l),3)
 
-def get_MSE(data1, data2, dim=1):
+def get_MSE(data1, data2, dim=1, section_ids=None):
+    """
+    section_ids: [MỚI] None (mặc định) -> hành vi CŨ, gộp toàn bộ N spot rồi tính 1 lần
+        (= trung bình CÓ TRỌNG SỐ theo số spot mỗi lát). Có giá trị -> tính MSE riêng
+        từng lát cắt rồi trung bình KHÔNG trọng số (mỗi lát nặng ngang nhau, tránh lát
+        đông spot lấn át lát ít spot khi 1 fold gồm nhiều lát cắt -- LOPO).
+    """
     adata1 = data1.X
     adata2 = data2.X
     mse_list = []
     for g in range(data1.shape[dim]):
         if dim == 1:
-            mse = mean_squared_error(adata1[:, g], adata2[:, g])
+            col1, col2 = adata1[:, g], adata2[:, g]
         elif dim == 0:
-            mse = mean_squared_error(adata1[g, :], adata2[g, :])
+            col1, col2 = adata1[g, :], adata2[g, :]
+        if section_ids is None:
+            mse = mean_squared_error(col1, col2)
+        else:
+            mse, _n_valid = _per_section_average(col1, col2, section_ids,
+                                                  mean_squared_error)
         mse_list.append(mse)
     return np.array(mse_list)
 
-def get_MAE(data1, data2, dim=1):
+def get_MAE(data1, data2, dim=1, section_ids=None):
+    """section_ids: [MỚI] xem docstring get_MSE() -- cùng lý do, cùng cơ chế."""
     adata1 = data1.X
     adata2 = data2.X
     mae_list = []
     for g in range(data1.shape[dim]):
         if dim == 1:
-            mae = mean_absolute_error(adata1[:, g], adata2[:, g])
+            col1, col2 = adata1[:, g], adata2[:, g]
         elif dim == 0:
-            mae = mean_absolute_error(adata1[g, :], adata2[g, :])
+            col1, col2 = adata1[g, :], adata2[g, :]
+        if section_ids is None:
+            mae = mean_absolute_error(col1, col2)
+        else:
+            mae, _n_valid = _per_section_average(col1, col2, section_ids,
+                                                  mean_absolute_error)
         mae_list.append(mae)
     return np.array(mae_list)
 
 
-def get_Spearman(data1, data2, dim=1):
+def get_Spearman(data1, data2, dim=1, section_ids=None):
     """
     Tính gene-wise Spearman Correlation Coefficient.
     Cùng convention với get_R: dim=1 → lặp theo gene (cột),
     trả về (rho_array, pvalue_array) shape (n_genes,).
     Spearman bổ sung cho PCC vì không giả định phân phối tuyến tính --
     bắt được cả monotonic relationship giữa pred và gt.
+
+    section_ids: [MỚI] xem docstring get_R() -- cùng lý do, cùng cơ chế.
     """
     adata1 = data1.X
     adata2 = data2.X
     rho_list, p_list = [], []
     for g in range(data1.shape[dim]):
         if dim == 1:
-            rho, pv = spearmanr(adata1[:, g], adata2[:, g])
+            col1, col2 = adata1[:, g], adata2[:, g]
         elif dim == 0:
-            rho, pv = spearmanr(adata1[g, :], adata2[g, :])
+            col1, col2 = adata1[g, :], adata2[g, :]
+        _, pv = spearmanr(col1, col2)   # p-value: giữ pooled, chỉ để tham khảo
+        if section_ids is None:
+            rho, _ = spearmanr(col1, col2)
+        else:
+            rho, _n_valid = _per_section_average(col1, col2, section_ids,
+                                                  lambda a, b: spearmanr(a, b)[0])
         rho_list.append(rho)
         p_list.append(pv)
     return np.array(rho_list), np.array(p_list)
