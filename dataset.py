@@ -74,6 +74,9 @@ class HER2ST(torch.utils.data.Dataset):
             'invasive cancer':0, 'breast glands':1, 'immune infiltrate':2, 
             'cancer in situ':3, 'connective tissue':4, 'adipose tissue':5, 'undetermined':-1
         }
+        # LOPO: test co the goM NHIEU slide cua cung 1 benh nhan, nhung chi 9 slide
+        # co file ground-truth (A1,B1,C1,D1,E1,F1,G2,H1,J1). Slide khong co nhan
+        # giu None -> get_test_labels() tu dong đien 'undetermined'.
         if not train:
             for name in self.names:
                 if name in ['A1', 'B1', 'C1', 'D1', 'E1', 'F1', 'G2', 'H1', 'J1']:
@@ -81,7 +84,7 @@ class HER2ST(torch.utils.data.Dataset):
                     idx = self.meta_dict[name].index
                     lbl = lbl_full.loc[idx, :]['label'].values
                     self.label[name] = lbl
-                # Lát cắt không có file annotation: self.label[name] giữ nguyên None
+                # Lat cat khong co file annotation: self.label[name] giu NONE
         elif train:
             for i in self.names:
                 idx=self.meta_dict[i].index

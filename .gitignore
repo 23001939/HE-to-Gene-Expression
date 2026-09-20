@@ -13,3 +13,6 @@ model_ckpts/
 wandb/
 __pycache__/
 .conda/
+
+# temp fix script
+.fix_lbl.py
