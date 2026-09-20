@@ -495,8 +495,13 @@ def run_one(mode, fold, n_genes, lr, max_epochs, batch_size,
 
     # ── Common, fair evaluation ───────────────────────────────────────────────
     g = list(np.load("data/her_hvg_cut_1000.npy", allow_pickle=True))
+    # [SỬA - lỗi Moran's I đa lát cắt] test_dataset (HER2ST, nay da LOPO) co the gom
+    # nhieu lat cat cua 1 benh nhan -> phai bao section_ids de get_MoransI khong noi
+    # lang gieng xuyen lat cat (xem predict.get_section_ids / predict.get_MoransI).
+    from predict import get_section_ids
+    section_ids = get_section_ids(test_dataset)
     adata_visual, metrics = evaluate_her2st_predictions(
-        adata_pred, adata_gt, g, label=label, n_clusters=4)
+        adata_pred, adata_gt, g, label=label, n_clusters=4, section_ids=section_ids)
     R, p_values = metrics["R"], metrics["p_values"]
     Spearman, spearman_pvalues = metrics["Spearman"], metrics["spearman_pvalues"]
     MSE, MAE, RMSE, morans = metrics["MSE"], metrics["MAE"], metrics["RMSE"], metrics["morans"]
