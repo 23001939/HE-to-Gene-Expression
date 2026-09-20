@@ -199,22 +199,6 @@ class HER2ST(torch.utils.data.Dataset):
         df.set_index('id',inplace=True)
         return df
 
-    def get_test_labels(self):
-        """[MỚI - sửa lỗi ARI/NMI đa lát cắt] Nối nhãn ground-truth của TẤT CẢ lát cắt
-        trong self.names theo đúng thứ tự, dùng 'undetermined' cho lát cắt không có
-        annotation. Cùng thứ tự với adata_pred/adata_gt được nối trong stnet_predict /
-        histogene_predict (torch.cat theo đúng thứ tự self.names, shuffle=False).
-        """
-        parts = []
-        for name in self.names:
-            lab = self.label.get(name)
-            if lab is None:
-                lab = np.full(len(self.meta_dict[name]), 'undetermined')
-            parts.append(np.asarray(lab))
-        if not parts:
-            return None
-        return np.concatenate(parts)
-
     
     def get_meta(self,name,gene_list=None):
         cnt = self.get_cnt(name)
