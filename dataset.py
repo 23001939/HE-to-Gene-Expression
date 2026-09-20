@@ -74,9 +74,6 @@ class HER2ST(torch.utils.data.Dataset):
             'invasive cancer':0, 'breast glands':1, 'immune infiltrate':2, 
             'cancer in situ':3, 'connective tissue':4, 'adipose tissue':5, 'undetermined':-1
         }
-        # LOPO: test co the goM NHIEU slide cua cung 1 benh nhan, nhung chi 9 slide
-        # co file ground-truth (A1,B1,C1,D1,E1,F1,G2,H1,J1). Slide khong co nhan
-        # giu None -> get_test_labels() tu dong đien 'undetermined'.
         if not train:
             for name in self.names:
                 if name in ['A1', 'B1', 'C1', 'D1', 'E1', 'F1', 'G2', 'H1', 'J1']:
@@ -84,7 +81,7 @@ class HER2ST(torch.utils.data.Dataset):
                     idx = self.meta_dict[name].index
                     lbl = lbl_full.loc[idx, :]['label'].values
                     self.label[name] = lbl
-                # Lat cat khong co file annotation: self.label[name] giu NONE
+                # Lát cắt không có file annotation: self.label[name] giữ nguyên None
         elif train:
             for i in self.names:
                 idx=self.meta_dict[i].index
@@ -96,7 +93,12 @@ class HER2ST(torch.utils.data.Dataset):
                 else:
                     self.label[i]=torch.full((len(idx),),-1)
         self.gene_set = list(gene_list)
-        self.exp_dict = {i:scp.transform.log(scp.normalize.library_size_normalize(m[self.gene_set].values)) for i,m in self.meta_dict.items()}
+        # [SỬA - đồng bộ chuẩn hóa với PixNet] Trước đây: library_size_normalize(rescale=10000)
+        # rồi log10(x+1) -- tức CP10K. PixNet dùng np.log1p(raw_count): lấy thẳng raw count,
+        # KHÔNG chia cho tổng count/spot (không chuẩn hóa library size), rồi ln(1+x). Đổi
+        # đúng công thức này để khớp PixNet -- lưu ý: log1p dùng ln (base e), không phải log10
+        # như bản cũ.
+        self.exp_dict = {i: np.log1p(m[self.gene_set].values) for i, m in self.meta_dict.items()}
         self.center_dict = {i:np.floor(m[['pixel_x','pixel_y']].values).astype(int) for i,m in self.meta_dict.items()}
         self.loc_dict = {i:m[['x','y']].values for i,m in self.meta_dict.items()}
         self.lengths = [len(i) for i in self.meta_dict.values()]
@@ -202,6 +204,22 @@ class HER2ST(torch.utils.data.Dataset):
         df.set_index('id',inplace=True)
         return df
 
+    def get_test_labels(self):
+        """[MỚI - sửa lỗi ARI/NMI đa lát cắt] Nối nhãn ground-truth của TẤT CẢ lát cắt
+        trong self.names theo đúng thứ tự, dùng 'undetermined' cho lát cắt không có
+        annotation. Cùng thứ tự với adata_pred/adata_gt được nối trong stnet_predict /
+        histogene_predict (torch.cat theo đúng thứ tự self.names, shuffle=False).
+        """
+        parts = []
+        for name in self.names:
+            lab = self.label.get(name)
+            if lab is None:
+                lab = np.full(len(self.meta_dict[name]), 'undetermined')
+            parts.append(np.asarray(lab))
+        if not parts:
+            return None
+        return np.concatenate(parts)
+
     
     def get_meta(self,name,gene_list=None):
         cnt = self.get_cnt(name)
@@ -303,7 +321,9 @@ class LightHGGEP_HER2ST(torch.utils.data.Dataset):
                     self.label[i] = torch.full((len(idx),), -1)
         
         self.gene_set = list(gene_list)
-        self.exp_dict = {i: scp.transform.log(scp.normalize.library_size_normalize(m[self.gene_set].values))
+        # [SỬA - đồng bộ chuẩn hóa với PixNet] xem comment chi tiết ở class HER2ST phía trên
+        # (cùng lý do, cùng công thức: bỏ library_size_normalize, chỉ dùng log1p trên raw count).
+        self.exp_dict = {i: np.log1p(m[self.gene_set].values)
                          for i, m in self.meta_dict.items()}
         self.center_dict = {i: np.floor(m[['pixel_x', 'pixel_y']].values).astype(int)
                             for i, m in self.meta_dict.items()}
