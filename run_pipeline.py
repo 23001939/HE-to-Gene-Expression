@@ -596,8 +596,13 @@ def run_fold(fold):
     # Common fair evaluation: metrics are always computed on raw log-normalised
     # expression.  Only the visualisation/clustering copy is standardised.
     g = test_dataset.gene_set  # dung dung bo gen cua dataset da chon (785 hoac 250)
+    # [SỬA - lỗi Moran's I đa lát cắt] test_dataset (LOPO) co the gom nhieu lat cat cua
+    # 1 benh nhan -> phai bao section_ids de get_MoransI khong noi lang gieng xuyen lat
+    # cat (xem predict.get_section_ids / predict.get_MoransI).
+    from predict import get_section_ids
+    section_ids = get_section_ids(test_dataset)
     adata_pred, metrics = evaluate_her2st_predictions(
-        adata_pred, adata_gt, g, label=label, n_clusters=4)
+        adata_pred, adata_gt, g, label=label, n_clusters=4, section_ids=section_ids)
     R, p_values = metrics['R'], metrics['p_values']
     Spearman, spearman_pvalues = metrics['Spearman'], metrics['spearman_pvalues']
     MSE, MAE, RMSE, morans = metrics['MSE'], metrics['MAE'], metrics['RMSE'], metrics['morans']
