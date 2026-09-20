@@ -11,11 +11,18 @@ PROTOCOL_NAME = "her2st-loocv-v1-raw-lognorm"
 
 
 def evaluate_her2st_predictions(adata_pred, adata_gt, genes, label=None,
-                                 n_clusters=4):
+                                 n_clusters=4, section_ids=None):
     """Evaluate all models on raw, log-library-normalised HER2ST expression.
 
     A standardised copy is used solely for PCA/t-SNE/K-means visualisation.
     Thus scaling cannot alter PCC, RMSE/MAE, Spearman, or Moran's I.
+
+    section_ids: [MỚI - sửa lỗi Moran's I đa lát cắt] None hoặc array[str] độ dài
+        N spot, lấy từ predict.get_section_ids(test_dataset), CÙNG THỨ TỰ với
+        adata_pred/adata_gt. Bắt buộc truyền khi tập test của 1 fold gồm nhiều
+        lát cắt (patient-level/LOPO split) -- nếu để None trong trường hợp đó,
+        Moran's I sẽ bị tính sai do nối láng giềng xuyên lát cắt (xem
+        predict.get_MoransI để biết chi tiết).
     """
     genes = list(genes)
     if adata_pred.shape != adata_gt.shape:
@@ -31,7 +38,7 @@ def evaluate_her2st_predictions(adata_pred, adata_gt, genes, label=None,
     MSE = get_MSE(adata_pred, adata_gt)
     MAE = get_MAE(adata_pred, adata_gt)
     RMSE = np.sqrt(MSE)
-    morans = get_MoransI_all(adata_pred, adata_gt, top_k=50)
+    morans = get_MoransI_all(adata_pred, adata_gt, top_k=50, section_ids=section_ids)
 
     adata_visual = adata_pred.copy()
     sc.pp.scale(adata_visual)
